@@ -135,11 +135,14 @@ async function handleClick(event) {
   const elementInfo = getElementInfo(element);
   console.log("Element info:", elementInfo);
   
-  // Capture the screenshot with the element highlighted
-  highlightElement(element);
+  // Capture the screenshot with the element highlighted and red dot at click position
+  highlightElement(element, event.clientX, event.clientY);
   console.log("Requesting screenshot");
+  // Short 50ms delay - optimized for Dell 5320 performance
+  await new Promise(resolve => setTimeout(resolve, 10));
   const screenshot = await captureScreenshot();
   removeHighlight();
+
   
   // Generate instruction
   const instruction = generateClickInstruction(elementInfo);
@@ -632,8 +635,8 @@ function generateInputInstruction(elementInfo, isSensitive, actualValue) {
   }
 }
 
-// Highlight an element with a distinctive overlay
-function highlightElement(element) {
+// Highlight an element with a distinctive overlay and add a red dot at click position
+function highlightElement(element, clickX, clickY) {
   if (!element) return;
   
   // Remove existing highlight if any
@@ -675,14 +678,38 @@ function highlightElement(element) {
   
   // Add to document
   document.body.appendChild(highlightOverlay);
+  
+  // Create a red dot at the click position
+  const redDot = document.createElement('div');
+  redDot.id = 'sotoscribe-click-dot';
+  redDot.style.position = 'absolute';
+  redDot.style.left = (clickX || (rect.left + rect.width/2)) + window.scrollX + 'px';
+  redDot.style.top = (clickY || (rect.top + rect.height/2)) + window.scrollY + 'px';
+  redDot.style.width = '20px';
+  redDot.style.height = '20px';
+  redDot.style.backgroundColor = 'rgba(255, 0, 0, 0.2)'; // Very transparent red (0.2 alpha)
+  redDot.style.boxShadow = '0 0 0 3px rgba(255, 0, 0, 0.4)'; // Slightly more visible outline
+  redDot.style.borderRadius = '50%';
+  redDot.style.transform = 'translate(-50%, -50%)';
+  redDot.style.zIndex = '9999999';
+  redDot.style.pointerEvents = 'none';
+  
+  // Add to document
+  document.body.appendChild(redDot);
 }
 
-// Remove the highlight overlay
+// Remove the highlight overlay and red dot
 function removeHighlight() {
   if (highlightOverlay && highlightOverlay.parentNode) {
     highlightOverlay.parentNode.removeChild(highlightOverlay);
   }
   highlightOverlay = null;
+  
+  // Also remove red dot if present
+  const redDot = document.getElementById('sotoscribe-click-dot');
+  if (redDot && redDot.parentNode) {
+    redDot.parentNode.removeChild(redDot);
+  }
 }
 
 // Capture a screenshot of the current page with throttling
