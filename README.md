@@ -72,24 +72,20 @@ SotoScribe is designed for secure, local installation in regulated environments.
 
 ### Exporting Your Documentation
 
-1. **PDF Export**
-   - Click "Export PDF" in the top-right corner
+1. **HTML Export**
+   - Click "Export HTML" in the top-right corner
    - Review the export preview
-   - Click "Download PDF" to generate and save locally
+   - Click "Download HTML" to generate and save locally
    - All data is cleared from memory after export
+   - Copy contents and paste into word to easily edit
 
-2. **SharePoint Embed**
-   - Click "Generate SharePoint Embed"
-   - Copy the provided HTML code
-   - Paste into your SharePoint page editor
-   - This code creates a self-contained documentation page
 
 ### Privacy and Security Notes
 
 - **No Data Storage**: All captured information exists in memory only
 - **Session Expiration**: Data is wiped when you close the editor tab
 - **Manual Controls**: You control what is captured and exported
-- **Local Processing**: All PDF generation happens locally in your browser
+- **Local Processing**: All HTML generation happens locally in your browser
 
 ### Troubleshooting
 
