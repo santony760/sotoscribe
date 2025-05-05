@@ -295,27 +295,28 @@
      </div>
    </div>
    
-   <!-- Image Edit Modal -->
-   <div id="imageEditModal" class="modal">
-     <div class="modal-content" style="max-width: 800px;">
-       <h2 class="modal-header">Edit Image</h2>
-       <p>Use the tools below to blur sensitive information or add annotations:</p>
-       
-       <div id="imageEditCanvas" style="width: 100%; margin: 15px 0; border: 1px solid #ddd;"></div>
-       
-       <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-         <button id="blurToolBtn" class="secondary">Blur Tool</button>
-         <button id="annotateToolBtn" class="secondary">Add Annotation</button>
-         <button id="resetImageBtn" class="secondary">Reset Image</button>
-       </div>
-       
-       <div class="modal-buttons">
-         <button id="cancelImageEditBtn" class="secondary">Cancel</button>
-         <button id="saveImageEditBtn">Save Changes</button>
-       </div>
-     </div>
-   </div>
-   
+<!-- Update to the Image Edit Modal in editor.html -->
+<div id="imageEditModal" class="modal">
+  <div class="modal-content" style="max-width: 800px;">
+    <h2 class="modal-header">Edit Image</h2>
+    <p>Use the tools below to blur sensitive information or add annotations:</p>
+    
+    <div id="imageEditCanvas" style="width: 100%; margin: 15px 0; border: 1px solid #ddd;"></div>
+    
+    <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+      <button id="blurToolBtn" class="secondary">Blur Tool</button>
+      <button id="annotateToolBtn" class="secondary">Add Annotation</button>
+      <button id="clickTargetBtn" class="secondary">Add Click Target</button>
+      <button id="resetImageBtn" class="secondary">Reset Image</button>
+    </div>
+    
+    <div class="modal-buttons">
+      <button id="cancelImageEditBtn" class="secondary">Cancel</button>
+      <button id="saveImageEditBtn">Save Changes</button>
+    </div>
+  </div>
+</div>
+ 
    <script src="editor.js"></script>
  </body>
  </html>
