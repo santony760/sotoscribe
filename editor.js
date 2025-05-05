@@ -27,6 +27,12 @@ let exportModal;
 let imageEditModal;
 let exportHtmlBtn;
 
+// For storing canvas elements and tracking drag functionality
+let canvasElements = [];
+let isDragging = false;
+let selectedElement = null;
+let offsetX, offsetY;
+
 // Initialize the editor
 document.addEventListener('DOMContentLoaded', async () => {
   // Get DOM elements
@@ -45,6 +51,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('saveImageEditBtn').addEventListener('click', saveImageEdit);
   document.getElementById('blurToolBtn').addEventListener('click', () => setImageEditTool('blur'));
   document.getElementById('annotateToolBtn').addEventListener('click', () => setImageEditTool('annotate'));
+  document.getElementById('clickTargetBtn').addEventListener('click', () => setImageEditTool('clickTarget'));
   document.getElementById('resetImageBtn').addEventListener('click', resetImage);
   
   // Get steps from background script
@@ -251,6 +258,9 @@ function openImageEditor(index) {
     return;
   }
   
+  // Reset canvas elements array
+  canvasElements = [];
+  
   // Set up canvas
   const canvasContainer = document.getElementById('imageEditCanvas');
   canvasContainer.innerHTML = `<canvas id="editCanvas" style="width: 100%;"></canvas>`;
@@ -267,10 +277,116 @@ function openImageEditor(index) {
     // Draw image
     ctx.drawImage(img, 0, 0);
     
+    // Setup drag events for the canvas
+    setupCanvasDragEvents(canvas);
+    
     // Show modal
     imageEditModal.style.display = 'flex';
   };
   img.src = imageSource;
+}
+
+// Setup drag events for canvas elements
+function setupCanvasDragEvents(canvas) {
+  // Mouse down event - start dragging if on an element
+  canvas.addEventListener('mousedown', function(event) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const mouseX = (event.clientX - rect.left) * scaleX;
+    const mouseY = (event.clientY - rect.top) * scaleY;
+
+    // Check if we're on a draggable element
+    for (let i = canvasElements.length - 1; i >= 0; i--) {
+      const element = canvasElements[i];
+      const dx = mouseX - element.x;
+      const dy = mouseY - element.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      
+      // If mouse is within the circle
+      if (distance <= element.radius) {
+        isDragging = true;
+        selectedElement = element;
+        offsetX = dx;
+        offsetY = dy;
+        break;
+      }
+    }
+  });
+
+  // Mouse move event - update position if dragging
+  canvas.addEventListener('mousemove', function(event) {
+    if (isDragging && selectedElement) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const mouseX = (event.clientX - rect.left) * scaleX;
+      const mouseY = (event.clientY - rect.top) * scaleY;
+      
+      // Update element position
+      selectedElement.x = mouseX - offsetX;
+      selectedElement.y = mouseY - offsetY;
+      
+      // Redraw canvas
+      redrawCanvas(canvas);
+    }
+  });
+
+  // Mouse up event - stop dragging
+  canvas.addEventListener('mouseup', function() {
+    isDragging = false;
+    selectedElement = null;
+  });
+  
+  // Mouse out event - stop dragging if mouse leaves canvas
+  canvas.addEventListener('mouseout', function() {
+    isDragging = false;
+    selectedElement = null;
+  });
+}
+
+// Redraw the canvas with all elements
+function redrawCanvas(canvas) {
+  const ctx = canvas.getContext('2d');
+  const step = workflowSteps[currentStepBeingEdited];
+  
+  // Clear canvas
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  
+  // Draw base image
+  const img = new Image();
+  img.onload = () => {
+    ctx.drawImage(img, 0, 0);
+    
+    // Draw all elements
+    canvasElements.forEach(element => {
+      if (element.type === 'annotation') {
+        // Draw circle
+        ctx.beginPath();
+        ctx.arc(element.x, element.y, element.radius, 0, 2 * Math.PI);
+        ctx.strokeStyle = '#00B3A4';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        
+        // Draw number
+        ctx.font = 'bold 16px Arial';
+        ctx.fillStyle = '#00B3A4';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(element.text, element.x, element.y);
+      } else if (element.type === 'clickTarget') {
+        // Draw red click target
+        ctx.beginPath();
+        ctx.arc(element.x, element.y, element.radius, 0, 2 * Math.PI);
+        ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 0, 0, 0.4)';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      }
+    });
+  };
+  img.src = step.screenshot;
 }
 
 // Set image edit tool
@@ -281,17 +397,71 @@ function setImageEditTool(tool) {
   // Clear existing event listeners
   canvas.removeEventListener('mousedown', handleBlur);
   canvas.removeEventListener('mousedown', handleAnnotate);
+  canvas.removeEventListener('mousedown', handleClickTarget);
   
   // Set new tool
   if (tool === 'blur') {
     canvas.addEventListener('mousedown', handleBlur);
   } else if (tool === 'annotate') {
     canvas.addEventListener('mousedown', handleAnnotate);
+  } else if (tool === 'clickTarget') {
+    canvas.addEventListener('mousedown', handleClickTarget);
   }
 }
 
-// Handle blur tool
-function handleBlur(event) {
+// Track if we're currently in blur mode
+let isBlurring = false;
+
+// Set image edit tool - KEEP ONLY THIS VERSION of the function
+function setImageEditTool(tool) {
+  const canvas = document.getElementById('editCanvas');
+  if (!canvas) return;
+  
+  // Clear existing event listeners
+  canvas.removeEventListener('mousedown', startBlurring);
+  canvas.removeEventListener('mousemove', handleBlurMove);
+  canvas.removeEventListener('mouseup', stopBlurring);
+  canvas.removeEventListener('mouseout', stopBlurring);
+  canvas.removeEventListener('mousedown', handleAnnotate);
+  canvas.removeEventListener('mousedown', handleClickTarget);
+  
+  // Set new tool
+  if (tool === 'blur') {
+    canvas.addEventListener('mousedown', startBlurring);
+    canvas.addEventListener('mousemove', handleBlurMove);
+    canvas.addEventListener('mouseup', stopBlurring);
+    canvas.addEventListener('mouseout', stopBlurring);
+  } else if (tool === 'annotate') {
+    canvas.addEventListener('mousedown', handleAnnotate);
+  } else if (tool === 'clickTarget') {
+    canvas.addEventListener('mousedown', handleClickTarget);
+  }
+}
+
+// Start blurring (on mouse down)
+function startBlurring(event) {
+  // Prevent starting blur if we're dragging an element
+  if (isDragging) return;
+  
+  isBlurring = true;
+  // Apply initial blur at the clicked position
+  applyBlur(event);
+}
+
+// Continue blurring as mouse moves
+function handleBlurMove(event) {
+  if (isBlurring) {
+    applyBlur(event);
+  }
+}
+
+// Stop blurring (on mouse up or mouse out)
+function stopBlurring() {
+  isBlurring = false;
+}
+
+// Apply blur at the current position
+function applyBlur(event) {
   const canvas = document.getElementById('editCanvas');
   const ctx = canvas.getContext('2d');
   
@@ -302,7 +472,7 @@ function handleBlur(event) {
   const x = (event.clientX - rect.left) * scaleX;
   const y = (event.clientY - rect.top) * scaleY;
   
-  // Apply pixelation effect (simplified blur)
+  // Apply pixelation effect (same as your current blur implementation)
   const size = 20; // Size of blur area
   const pixelSize = 10; // Size of pixelation
   
@@ -360,6 +530,9 @@ function handleAnnotate(event) {
   const canvas = document.getElementById('editCanvas');
   const ctx = canvas.getContext('2d');
   
+  // Check if we're trying to drag an element
+  if (isDragging) return;
+  
   // Get mouse position
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
@@ -381,6 +554,52 @@ function handleAnnotate(event) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(stepNumber.toString(), x, y);
+  
+  // Add to canvas elements for drag support
+  canvasElements.push({
+    type: 'annotation',
+    x: x,
+    y: y,
+    radius: 15,
+    text: stepNumber.toString()
+  });
+}
+
+// Handle click target tool
+function handleClickTarget(event) {
+  const canvas = document.getElementById('editCanvas');
+  const ctx = canvas.getContext('2d');
+  
+  // Check if we're trying to drag an element
+  if (isDragging) return;
+  
+  // Get mouse position
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (event.clientX - rect.left) * scaleX;
+  const y = (event.clientY - rect.top) * scaleY;
+  
+  // Draw red click target with shadow effect
+  // First draw the "shadow" (outer circle)
+  ctx.beginPath();
+  ctx.arc(x, y, 20, 0, 2 * Math.PI); // 10px for inner circle + 3px for the shadow spread
+  ctx.fillStyle = 'rgba(255, 0, 0, 0.2)'; // Shadow color from the original
+  ctx.fill();
+
+  // Then draw the inner circle on top
+  ctx.beginPath();
+  ctx.arc(x, y, 17, 0, 2 * Math.PI); // 10px radius = 20px diameter
+  ctx.fillStyle = 'rgba(255, 0, 0, 0.1)'; // Main dot color from the original
+  ctx.fill();
+  
+  // Add to canvas elements for drag support
+  canvasElements.push({
+    type: 'clickTarget',
+    x: x,
+    y: y,
+    radius: 20  // Use the larger radius (shadow size) for hit detection
+  });
 }
 
 // Reset image to original
@@ -391,6 +610,9 @@ function resetImage() {
   const imageSource = step.screenshot;
   
   if (!imageSource) return;
+  
+  // Clear canvas elements
+  canvasElements = [];
   
   // Reload the image
   const canvas = document.getElementById('editCanvas');
@@ -425,6 +647,8 @@ function saveImageEdit() {
 function closeImageEditModal() {
   imageEditModal.style.display = 'none';
   currentStepBeingEdited = null;
+  isDragging = false;
+  selectedElement = null;
 }
 
 // Prepare for export
