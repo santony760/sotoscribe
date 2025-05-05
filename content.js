@@ -693,15 +693,13 @@ function highlightElement(element, clickX, clickY) {
   if (!document.getElementById('sotoscribe-highlight-style')) {
     const style = document.createElement('style');
     style.id = 'sotoscribe-highlight-style';
-      // For stylesheets, we need to use textContent to safely set CSS content
-    style.textContent = `
+    style.innerHTML = `
       @keyframes sotoscribe-pulse {
         0% { box-shadow: 0 0 0 0 rgba(0, 179, 164, 0.4); }
         70% { box-shadow: 0 0 0 10px rgba(0, 179, 164, 0); }
         100% { box-shadow: 0 0 0 0 rgba(0, 179, 164, 0); }
       }
     `;
-// Using textContent for CSS is secure as it doesn't parse HTML and treats the content as plain text
     document.head.appendChild(style);
   }
   
