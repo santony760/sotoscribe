@@ -125,6 +125,13 @@ function formatUrl(url) {
 // Handle click events
 async function handleClick(event) {
   if (!isCapturing) return;
+  
+  // Skip programmatically triggered clicks
+  if (!event.isTrusted) {
+    console.log("Ignoring non-user click event");
+    return;
+  }
+  
   console.log("Click event captured");
   
   // Get the clicked element
@@ -185,6 +192,13 @@ async function handleClick(event) {
 // Handle form submission
 async function handleFormSubmit(event) {
   if (!isCapturing) return;
+  
+  // Skip programmatically triggered form submissions
+  if (!event.isTrusted) {
+    console.log("Ignoring non-user form submission");
+    return;
+  }
+  
   console.log("Form submission captured");
   
   // Get the form element
@@ -242,6 +256,12 @@ async function handleFormSubmit(event) {
 async function handleKeyDown(event) {
   if (!isCapturing) return;
   
+  // Skip programmatically triggered key events
+  if (!event.isTrusted) {
+    console.log("Ignoring non-user keyboard event");
+    return;
+  }
+  
   // Only capture keyboard shortcuts (with modifier keys)
   if (event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) {
     console.log("Keyboard shortcut captured");
@@ -293,6 +313,13 @@ async function handleKeyDown(event) {
 // Handle input events with throttling
 function handleInput(event) {
   if (!isCapturing) return;
+  
+  // Skip programmatically triggered input events
+  if (!event.isTrusted) {
+    console.log("Ignoring non-user input event");
+    return;
+  }
+  
   console.log("Input event captured");
   
   // Get the input element
