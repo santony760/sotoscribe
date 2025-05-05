@@ -14,846 +14,832 @@
  * limitations under the License.
  */
 
-// SotoScribe - Editor Controller
-// Handles the post-capture workspace for editing and exporting workflows
+// SotoScribe - Content Script
+// Handles all DOM events and screenshot capturing
 
-// In-memory storage for steps
-let workflowSteps = [];
-let currentStepBeingEdited = null;
+console.log("SotoScribe content script loaded");
 
-// DOM elements
-let stepsContainer;
-let exportModal;
-let imageEditModal;
-let exportHtmlBtn;
+// In-memory state variables
+let isCapturing = false;
+let sessionId = null;
+let lastActionElement = null;
+let highlightOverlay = null;
+let pageNavigations = [];
 
-// For storing canvas elements and tracking drag functionality
-let canvasElements = [];
-let isDragging = false;
-let selectedElement = null;
-let offsetX, offsetY;
+// Throttle state for input events
+let pendingScreenshots = new Map();
+const SCREENSHOT_THROTTLE_MS = 1000; // Minimum 1 second between screenshots
 
-// Initialize the editor
-document.addEventListener('DOMContentLoaded', async () => {
-  // Get DOM elements
-  stepsContainer = document.getElementById('stepsContainer');
-  exportModal = document.getElementById('exportModal');
-  imageEditModal = document.getElementById('imageEditModal');
-  exportHtmlBtn = document.getElementById('exportHtmlBtn');
+// Initialize event listeners
+function setupListeners() {
+  console.log("Setting up event listeners");
+  document.addEventListener('click', handleClick, true);
+  document.addEventListener('keydown', handleKeyDown, true);
+  document.addEventListener('input', handleInput, true);
+  document.addEventListener('submit', handleFormSubmit, true);
   
-  // Add event listeners for export buttons
-  exportHtmlBtn.addEventListener('click', () => prepareExport());
-  document.getElementById('closeExportBtn').addEventListener('click', closeExportModal);
-  document.getElementById('confirmExportBtn').addEventListener('click', downloadExport);
-  
-  // Image editing modal buttons
-  document.getElementById('cancelImageEditBtn').addEventListener('click', closeImageEditModal);
-  document.getElementById('saveImageEditBtn').addEventListener('click', saveImageEdit);
-  document.getElementById('blurToolBtn').addEventListener('click', () => setImageEditTool('blur'));
-  document.getElementById('annotateToolBtn').addEventListener('click', () => setImageEditTool('annotate'));
-  document.getElementById('clickTargetBtn').addEventListener('click', () => setImageEditTool('clickTarget'));
-  document.getElementById('resetImageBtn').addEventListener('click', resetImage);
-  
-  // Get steps from background script
-  await loadSteps();
-  
-  // Render steps
-  renderSteps();
-  
-  // Listen for beforeunload to warn about data loss
-  window.addEventListener('beforeunload', (event) => {
-    if (workflowSteps.length > 0) {
-      event.preventDefault();
-      event.returnValue = 'You have unsaved changes. Are you sure you want to leave?';
-      return event.returnValue;
-    }
-  });
-});
-
-// Load steps from background script
-async function loadSteps() {
-  return new Promise((resolve) => {
-    try {
-      chrome.runtime.sendMessage({ action: 'getSteps' }, (response) => {
-        if (response && response.steps) {
-          workflowSteps = response.steps;
-          console.log("Successfully loaded", workflowSteps.length, "steps");
-        }
-        resolve();
-      });
-    } catch (error) {
-      console.error("Error loading steps:", error);
-      resolve();
-    }
-  });
-}
-
-// Render all steps in the editor
-function renderSteps() {
-  // Clear the container
-  stepsContainer.innerHTML = '';
-  
-  // Add each step
-  workflowSteps.forEach((step, index) => {
-    const stepElement = createStepElement(step, index);
-    stepsContainer.appendChild(stepElement);
-  });
-  
-  // Show message if no steps
-  if (workflowSteps.length === 0) {
-    stepsContainer.innerHTML = `
-      <div style="text-align: center; padding: 50px; color: #666;">
-        <p>No steps have been captured yet.</p>
-        <button id="startNewCapture" class="secondary">Start New Capture</button>
-      </div>
-    `;
+  // Also track URL changes for SPAs
+  if (window.history && window.history.pushState) {
+    const originalPushState = window.history.pushState;
+    window.history.pushState = function() {
+      originalPushState.apply(this, arguments);
+      handleUrlChange();
+    };
     
-    document.getElementById('startNewCapture').addEventListener('click', () => {
-      window.close();
-    });
+    window.addEventListener('popstate', handleUrlChange);
   }
 }
 
-// Create a DOM element for a step
-function createStepElement(step, index) {
-  const stepElement = document.createElement('div');
-  stepElement.className = 'step';
-  stepElement.dataset.index = index;
+// Remove all event listeners
+function removeListeners() {
+  console.log("Removing event listeners");
+  document.removeEventListener('click', handleClick, true);
+  document.removeEventListener('keydown', handleKeyDown, true);
+  document.removeEventListener('input', handleInput, true);
+  document.removeEventListener('submit', handleFormSubmit, true);
   
-  // Create step header
-  const header = document.createElement('div');
-  header.className = 'step-header';
-  header.innerHTML = `
-    <div class="step-number">Step ${index + 1}</div>
-    <div class="step-buttons">
-      ${index > 0 ? '<button class="step-button move-up" title="Move Up">↑</button>' : ''}
-      ${index < workflowSteps.length - 1 ? '<button class="step-button move-down" title="Move Down">↓</button>' : ''}
-      <button class="step-button delete" title="Delete Step">×</button>
-    </div>
-  `;
-  
-  // Create step content
-  const content = document.createElement('div');
-  content.className = 'step-content';
-  
-  // Image section
-  const imageSection = document.createElement('div');
-  imageSection.className = 'step-image';
-  
-  if (step.screenshot) {
-    imageSection.innerHTML = `
-      <img src="${step.screenshot}" alt="Step ${index + 1}" />
-      <div class="image-controls">
-        <button class="step-button edit-image" title="Edit Image">✏️</button>
-      </div>
-    `;
-  } else {
-    imageSection.innerHTML = `
-      <div style="padding: 50px; text-align: center; background-color: #f5f5f5; border-radius: 3px;">
-        <p>No screenshot available</p>
-      </div>
-    `;
+  // Restore original pushState if we modified it
+  if (window._originalPushState) {
+    window.history.pushState = window._originalPushState;
   }
   
-  // Details section
-  const detailsSection = document.createElement('div');
-  detailsSection.className = 'step-details';
+  window.removeEventListener('popstate', handleUrlChange);
+}
+
+// Handle URL changes (for SPAs)
+async function handleUrlChange() {
+  if (!isCapturing) return;
   
-  // Create editable instruction
-  const instructionTextarea = document.createElement('textarea');
-  instructionTextarea.className = 'step-instruction';
-  instructionTextarea.value = step.instruction || '';
-  instructionTextarea.placeholder = 'Enter instruction for this step...';
+  const currentUrl = window.location.href;
   
-  // Update the step data when instruction changes
-  instructionTextarea.addEventListener('change', () => {
-    workflowSteps[index].instruction = instructionTextarea.value;
+  // Check if this is a new URL
+  if (pageNavigations.includes(currentUrl)) return;
+  
+  console.log("URL change detected:", currentUrl);
+  pageNavigations.push(currentUrl);
+  
+  // Wait a moment for page to render
+  await new Promise(resolve => setTimeout(resolve, 500));
+  
+  // Capture screenshot
+  const screenshot = await captureScreenshot();
+  
+  // Create step data for page navigation
+  const stepData = {
+    type: 'navigate',
+    url: currentUrl,
+    title: document.title,
+    timestamp: Date.now(),
+    instruction: `Navigate to **${document.title}** (${formatUrl(currentUrl)})`,
+    screenshot
+  };
+  
+  // Send step to background script
+  chrome.runtime.sendMessage({
+    action: 'addStep',
+    data: stepData
+  }, response => {
+    if (response && response.success) {
+      console.log("Navigation step added successfully");
+    } else {
+      console.error("Failed to add navigation step:", response);
+    }
   });
-  
-  // Add metadata
-  const metadata = document.createElement('div');
-  metadata.className = 'step-metadata';
-  metadata.textContent = `${step.title || 'Untitled Page'} (${formatUrl(step.url || '')})`;
-  
-  // Assemble the details section
-  detailsSection.appendChild(instructionTextarea);
-  detailsSection.appendChild(metadata);
-  
-  // Assemble the content
-  content.appendChild(imageSection);
-  content.appendChild(detailsSection);
-  
-  // Assemble the step
-  stepElement.appendChild(header);
-  stepElement.appendChild(content);
-  
-  // Add event listeners for buttons
-  const moveUpBtn = header.querySelector('.move-up');
-  if (moveUpBtn) {
-    moveUpBtn.addEventListener('click', () => moveStep(index, 'up'));
-  }
-  
-  const moveDownBtn = header.querySelector('.move-down');
-  if (moveDownBtn) {
-    moveDownBtn.addEventListener('click', () => moveStep(index, 'down'));
-  }
-  
-  const deleteBtn = header.querySelector('.delete');
-  deleteBtn.addEventListener('click', () => deleteStep(index));
-  
-  const editImageBtn = content.querySelector('.edit-image');
-  if (editImageBtn) {
-    editImageBtn.addEventListener('click', () => openImageEditor(index));
-  }
-  
-  return stepElement;
 }
 
 // Format URL for display
 function formatUrl(url) {
   try {
     const urlObj = new URL(url);
-    return urlObj.hostname + urlObj.pathname.slice(0, 20) + (urlObj.pathname.length > 20 ? '...' : '');
+    const domain = urlObj.hostname;
+    const path = urlObj.pathname;
+    const query = urlObj.search;
+    
+    // Return formatted URL with path and query parameters
+    return `${domain}${path}${query ? query.substring(0, 30) + (query.length > 30 ? '...' : '') : ''}`;
   } catch (e) {
     return url;
   }
 }
 
-// Move a step up or down
-function moveStep(index, direction) {
-  if (direction === 'up' && index > 0) {
-    // Swap with previous step
-    const temp = workflowSteps[index];
-    workflowSteps[index] = workflowSteps[index - 1];
-    workflowSteps[index - 1] = temp;
-  } else if (direction === 'down' && index < workflowSteps.length - 1) {
-    // Swap with next step
-    const temp = workflowSteps[index];
-    workflowSteps[index] = workflowSteps[index + 1];
-    workflowSteps[index + 1] = temp;
-  }
+// Handle click events
+async function handleClick(event) {
+  if (!isCapturing) return;
   
-  // Re-render steps
-  renderSteps();
-}
-
-// Delete a step
-function deleteStep(index) {
-  if (confirm('Are you sure you want to delete this step?')) {
-    workflowSteps.splice(index, 1);
-    renderSteps();
-  }
-}
-
-// Open image editor
-function openImageEditor(index) {
-  currentStepBeingEdited = index;
-  
-  // Get the image
-  const step = workflowSteps[index];
-  const imageSource = step.screenshot;
-  
-  if (!imageSource) {
-    alert('No image available to edit.');
+  // Skip programmatically triggered clicks
+  if (!event.isTrusted) {
+    console.log("Ignoring non-user click event");
     return;
   }
   
-  // Reset canvas elements array
-  canvasElements = [];
+  console.log("Click event captured");
   
-  // Set up canvas
-  const canvasContainer = document.getElementById('imageEditCanvas');
-  canvasContainer.innerHTML = `<canvas id="editCanvas" style="width: 100%;"></canvas>`;
-  const canvas = document.getElementById('editCanvas');
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  // Get the clicked element
+  const element = event.target;
+  lastActionElement = element;
   
-  // Load image
-  const img = new Image();
-  img.onload = () => {
-    // Set canvas dimensions
-    canvas.width = img.width;
-    canvas.height = img.height;
-    
-    // Draw image
-    ctx.drawImage(img, 0, 0);
-    
-    // Setup drag events for the canvas
-    setupCanvasDragEvents(canvas);
-    
-    // Show modal
-    imageEditModal.style.display = 'flex';
+  // Determine the element description
+  const elementInfo = getElementInfo(element);
+  console.log("Element info:", elementInfo);
+  
+  // Capture the screenshot with the element highlighted and red dot at click position
+  highlightElement(element, event.clientX, event.clientY);
+  console.log("Requesting screenshot");
+  // Short 50ms delay - optimized for Dell 5320 performance
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const screenshot = await captureScreenshot();
+  removeHighlight();
+
+  
+  // Generate instruction
+  const instruction = generateClickInstruction(elementInfo);
+  
+  // Get URL and context
+  const pageUrl = window.location.href;
+  const pageContext = {
+    title: document.title,
+    url: pageUrl,
+    path: window.location.pathname,
+    query: window.location.search
   };
-  img.src = imageSource;
-}
-
-// Setup drag events for canvas elements
-function setupCanvasDragEvents(canvas) {
-  // Mouse down event - start dragging if on an element
-  canvas.addEventListener('mousedown', function(event) {
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const mouseX = (event.clientX - rect.left) * scaleX;
-    const mouseY = (event.clientY - rect.top) * scaleY;
-
-    // Check if we're on a draggable element
-    for (let i = canvasElements.length - 1; i >= 0; i--) {
-      const element = canvasElements[i];
-      const dx = mouseX - element.x;
-      const dy = mouseY - element.y;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      
-      // If mouse is within the circle
-      if (distance <= element.radius) {
-        isDragging = true;
-        selectedElement = element;
-        offsetX = dx;
-        offsetY = dy;
-        break;
-      }
-    }
-  });
-
-  // Mouse move event - update position if dragging
-  canvas.addEventListener('mousemove', function(event) {
-    if (isDragging && selectedElement) {
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
-      const mouseX = (event.clientX - rect.left) * scaleX;
-      const mouseY = (event.clientY - rect.top) * scaleY;
-      
-      // Update element position
-      selectedElement.x = mouseX - offsetX;
-      selectedElement.y = mouseY - offsetY;
-      
-      // Redraw canvas
-      redrawCanvas(canvas);
-    }
-  });
-
-  // Mouse up event - stop dragging
-  canvas.addEventListener('mouseup', function() {
-    isDragging = false;
-    selectedElement = null;
-  });
   
-  // Mouse out event - stop dragging if mouse leaves canvas
-  canvas.addEventListener('mouseout', function() {
-    isDragging = false;
-    selectedElement = null;
+  // Create step data
+  const stepData = {
+    type: 'click',
+    url: pageUrl,
+    title: document.title,
+    timestamp: Date.now(),
+    elementInfo,
+    pageContext,
+    instruction,
+    screenshot
+  };
+  
+  // Send step to background script
+  console.log("Sending click step to background");
+  chrome.runtime.sendMessage({
+    action: 'addStep',
+    data: stepData
+  }, response => {
+    if (response && response.success) {
+      console.log("Step added successfully, total steps:", response.stepCount);
+    } else {
+      console.error("Failed to add step:", response);
+    }
   });
 }
 
-// Redraw the canvas with all elements
-function redrawCanvas(canvas) {
-  const ctx = canvas.getContext('2d');
-  const step = workflowSteps[currentStepBeingEdited];
+// Handle form submission
+async function handleFormSubmit(event) {
+  if (!isCapturing) return;
   
-  // Clear canvas
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Skip programmatically triggered form submissions
+  if (!event.isTrusted) {
+    console.log("Ignoring non-user form submission");
+    return;
+  }
   
-  // Draw base image
-  const img = new Image();
-  img.onload = () => {
-    ctx.drawImage(img, 0, 0);
+  console.log("Form submission captured");
+  
+  // Get the form element
+  const form = event.target;
+  
+  // Create a map of form values (with sensitive data masked)
+  const formData = {};
+  const formElements = form.elements;
+  
+  for (let i = 0; i < formElements.length; i++) {
+    const element = formElements[i];
     
-    // Draw all elements
-    canvasElements.forEach(element => {
-      if (element.type === 'annotation') {
-        // Draw circle
-        ctx.beginPath();
-        ctx.arc(element.x, element.y, element.radius, 0, 2 * Math.PI);
-        ctx.strokeStyle = '#00B3A4';
-        ctx.lineWidth = 3;
-        ctx.stroke();
-        
-        // Draw number
-        ctx.font = 'bold 16px Arial';
-        ctx.fillStyle = '#00B3A4';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(element.text, element.x, element.y);
-      } else if (element.type === 'clickTarget') {
-        // Draw red click target
-        ctx.beginPath();
-        ctx.arc(element.x, element.y, element.radius, 0, 2 * Math.PI);
-        ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(255, 0, 0, 0.4)';
-        ctx.lineWidth = 3;
-        ctx.stroke();
+    // Skip buttons and elements without names
+    if (!element.name || element.type === 'button' || element.type === 'submit') continue;
+    
+    // Mask sensitive data
+    if (isSensitiveField(element)) {
+      formData[element.name] = '[MASKED]';
+    } else {
+      formData[element.name] = element.value;
+    }
+  }
+  
+  // Capture screenshot
+  const screenshot = await captureScreenshot();
+  
+  // Generate instruction
+  const instruction = `Submit the **${form.id || form.name || 'form'}** form with the filled data`;
+  
+  // Create step data
+  const stepData = {
+    type: 'form_submit',
+    url: window.location.href,
+    title: document.title,
+    timestamp: Date.now(),
+    formData,
+    instruction,
+    screenshot
+  };
+  
+  // Send step to background script
+  chrome.runtime.sendMessage({
+    action: 'addStep',
+    data: stepData
+  }, response => {
+    if (response && response.success) {
+      console.log("Form submission step added successfully");
+    } else {
+      console.error("Failed to add form submission step:", response);
+    }
+  });
+}
+
+// Handle keydown events
+async function handleKeyDown(event) {
+  if (!isCapturing) return;
+  
+  // Skip programmatically triggered key events
+  if (!event.isTrusted) {
+    console.log("Ignoring non-user keyboard event");
+    return;
+  }
+  
+  // Only capture keyboard shortcuts (with modifier keys)
+  if (event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) {
+    console.log("Keyboard shortcut captured");
+    
+    // Create a human-readable keyboard shortcut
+    const shortcut = generateKeyboardShortcut(event);
+    
+    // Target element
+    const targetElement = document.activeElement;
+    const elementInfo = targetElement ? getElementInfo(targetElement) : null;
+    
+    // Capture screenshot
+    console.log("Requesting screenshot for keyboard event");
+    const screenshot = await captureScreenshot();
+    
+    // Generate instruction
+    let instruction = `Press **${shortcut}**`;
+    if (elementInfo && elementInfo.elementName) {
+      instruction += ` while focused on the **${elementInfo.elementName}** element`;
+    }
+    
+    // Create step data
+    const stepData = {
+      type: 'keyboard',
+      url: window.location.href,
+      title: document.title,
+      timestamp: Date.now(),
+      shortcut,
+      targetElement: elementInfo,
+      instruction,
+      screenshot
+    };
+    
+    // Send step to background script
+    console.log("Sending keyboard step to background");
+    chrome.runtime.sendMessage({
+      action: 'addStep',
+      data: stepData
+    }, response => {
+      if (response && response.success) {
+        console.log("Keyboard step added successfully");
+      } else {
+        console.error("Failed to add keyboard step:", response);
       }
     });
-  };
-  img.src = step.screenshot;
-}
-
-// Set image edit tool
-function setImageEditTool(tool) {
-  const canvas = document.getElementById('editCanvas');
-  if (!canvas) return;
-  
-  // Clear existing event listeners
-  canvas.removeEventListener('mousedown', handleBlur);
-  canvas.removeEventListener('mousedown', handleAnnotate);
-  canvas.removeEventListener('mousedown', handleClickTarget);
-  
-  // Set new tool
-  if (tool === 'blur') {
-    canvas.addEventListener('mousedown', handleBlur);
-  } else if (tool === 'annotate') {
-    canvas.addEventListener('mousedown', handleAnnotate);
-  } else if (tool === 'clickTarget') {
-    canvas.addEventListener('mousedown', handleClickTarget);
   }
 }
 
-// Track if we're currently in blur mode
-let isBlurring = false;
-
-// Set image edit tool - KEEP ONLY THIS VERSION of the function
-function setImageEditTool(tool) {
-  const canvas = document.getElementById('editCanvas');
-  if (!canvas) return;
+// Handle input events with throttling
+function handleInput(event) {
+  if (!isCapturing) return;
   
-  // Clear existing event listeners
-  canvas.removeEventListener('mousedown', startBlurring);
-  canvas.removeEventListener('mousemove', handleBlurMove);
-  canvas.removeEventListener('mouseup', stopBlurring);
-  canvas.removeEventListener('mouseout', stopBlurring);
-  canvas.removeEventListener('mousedown', handleAnnotate);
-  canvas.removeEventListener('mousedown', handleClickTarget);
-  
-  // Set new tool
-  if (tool === 'blur') {
-    canvas.addEventListener('mousedown', startBlurring);
-    canvas.addEventListener('mousemove', handleBlurMove);
-    canvas.addEventListener('mouseup', stopBlurring);
-    canvas.addEventListener('mouseout', stopBlurring);
-  } else if (tool === 'annotate') {
-    canvas.addEventListener('mousedown', handleAnnotate);
-  } else if (tool === 'clickTarget') {
-    canvas.addEventListener('mousedown', handleClickTarget);
-  }
-}
-
-// Start blurring (on mouse down)
-function startBlurring(event) {
-  // Prevent starting blur if we're dragging an element
-  if (isDragging) return;
-  
-  isBlurring = true;
-  // Apply initial blur at the clicked position
-  applyBlur(event);
-}
-
-// Continue blurring as mouse moves
-function handleBlurMove(event) {
-  if (isBlurring) {
-    applyBlur(event);
-  }
-}
-
-// Stop blurring (on mouse up or mouse out)
-function stopBlurring() {
-  isBlurring = false;
-}
-
-// Apply blur at the current position
-function applyBlur(event) {
-  const canvas = document.getElementById('editCanvas');
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  
-  // Get mouse position
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const x = (event.clientX - rect.left) * scaleX;
-  const y = (event.clientY - rect.top) * scaleY;
-  
-  // Apply pixelation effect (same as your current blur implementation)
-  const size = 20; // Size of blur area
-  const pixelSize = 10; // Size of pixelation
-  
-  // Store the region data
-  const imageData = ctx.getImageData(x - size/2, y - size/2, size, size);
-  
-  // Pixelate the region
-  for (let i = 0; i < size; i += pixelSize) {
-    for (let j = 0; j < size; j += pixelSize) {
-      // Skip if out of bounds
-      if (i + pixelSize > size || j + pixelSize > size) continue;
-      
-      // Get average color
-      let r = 0, g = 0, b = 0, a = 0, count = 0;
-      
-      for (let dx = 0; dx < pixelSize; dx++) {
-        for (let dy = 0; dy < pixelSize; dy++) {
-          const idx = ((j + dy) * size + (i + dx)) * 4;
-          if (idx < imageData.data.length) {
-            r += imageData.data[idx];
-            g += imageData.data[idx + 1];
-            b += imageData.data[idx + 2];
-            a += imageData.data[idx + 3];
-            count++;
-          }
-        }
-      }
-      
-      r = Math.floor(r / count);
-      g = Math.floor(g / count);
-      b = Math.floor(b / count);
-      a = Math.floor(a / count);
-      
-      // Apply average color to the region
-      for (let dx = 0; dx < pixelSize; dx++) {
-        for (let dy = 0; dy < pixelSize; dy++) {
-          const idx = ((j + dy) * size + (i + dx)) * 4;
-          if (idx < imageData.data.length) {
-            imageData.data[idx] = r;
-            imageData.data[idx + 1] = g;
-            imageData.data[idx + 2] = b;
-            imageData.data[idx + 3] = a;
-          }
-        }
-      }
-    }
-  }
-  
-  // Put the modified data back
-  ctx.putImageData(imageData, x - size/2, y - size/2);
-}
-
-// Handle annotate tool
-function handleAnnotate(event) {
-  const canvas = document.getElementById('editCanvas');
-  const ctx = canvas.getContext('2d');
-  
-  // Check if we're trying to drag an element
-  if (isDragging) return;
-  
-  // Get mouse position
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const x = (event.clientX - rect.left) * scaleX;
-  const y = (event.clientY - rect.top) * scaleY;
-  
-  // Draw circle
-  ctx.beginPath();
-  ctx.arc(x, y, 15, 0, 2 * Math.PI);
-  ctx.strokeStyle = '#00B3A4';
-  ctx.lineWidth = 3;
-  ctx.stroke();
-  
-  // Add number label
-  const stepNumber = parseInt(prompt('Enter annotation number:', '1')) || 1;
-  ctx.font = 'bold 16px Arial';
-  ctx.fillStyle = '#00B3A4';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(stepNumber.toString(), x, y);
-  
-  // Add to canvas elements for drag support
-  canvasElements.push({
-    type: 'annotation',
-    x: x,
-    y: y,
-    radius: 15,
-    text: stepNumber.toString()
-  });
-}
-
-// Handle click target tool
-function handleClickTarget(event) {
-  const canvas = document.getElementById('editCanvas');
-  const ctx = canvas.getContext('2d');
-  
-  // Check if we're trying to drag an element
-  if (isDragging) return;
-  
-  // Get mouse position
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const x = (event.clientX - rect.left) * scaleX;
-  const y = (event.clientY - rect.top) * scaleY;
-  
-  // Draw red click target with shadow effect
-  // First draw the "shadow" (outer circle)
-  ctx.beginPath();
-  ctx.arc(x, y, 20, 0, 2 * Math.PI); // 10px for inner circle + 3px for the shadow spread
-  ctx.fillStyle = 'rgba(255, 0, 0, 0.2)'; // Shadow color from the original
-  ctx.fill();
-
-  // Then draw the inner circle on top
-  ctx.beginPath();
-  ctx.arc(x, y, 17, 0, 2 * Math.PI); // 10px radius = 20px diameter
-  ctx.fillStyle = 'rgba(255, 0, 0, 0.1)'; // Main dot color from the original
-  ctx.fill();
-  
-  // Add to canvas elements for drag support
-  canvasElements.push({
-    type: 'clickTarget',
-    x: x,
-    y: y,
-    radius: 20  // Use the larger radius (shadow size) for hit detection
-  });
-}
-
-// Reset image to original
-function resetImage() {
-  if (!currentStepBeingEdited && currentStepBeingEdited !== 0) return;
-  
-  const step = workflowSteps[currentStepBeingEdited];
-  const imageSource = step.screenshot;
-  
-  if (!imageSource) return;
-  
-  // Clear canvas elements
-  canvasElements = [];
-  
-  // Reload the image
-  const canvas = document.getElementById('editCanvas');
-  const ctx = canvas.getContext('2d');
-  
-  const img = new Image();
-  img.onload = () => {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0);
-  };
-  img.src = imageSource;
-}
-
-// Save image edit
-function saveImageEdit() {
-  if (!currentStepBeingEdited && currentStepBeingEdited !== 0) return;
-  
-  const canvas = document.getElementById('editCanvas');
-  if (!canvas) return;
-  
-  // Update the screenshot in the steps data
-  workflowSteps[currentStepBeingEdited].screenshot = canvas.toDataURL('image/png');
-  
-  // Close modal
-  closeImageEditModal();
-  
-  // Re-render steps
-  renderSteps();
-}
-
-// Close image edit modal
-function closeImageEditModal() {
-  imageEditModal.style.display = 'none';
-  currentStepBeingEdited = null;
-  isDragging = false;
-  selectedElement = null;
-}
-
-// Prepare for export
-function prepareExport() {
-  if (workflowSteps.length === 0) {
-    alert('No steps to export. Capture some workflow steps first.');
+  // Skip programmatically triggered input events
+  if (!event.isTrusted) {
+    console.log("Ignoring non-user input event");
     return;
   }
   
-  // Show modal
-  exportModal.style.display = 'flex';
+  console.log("Input event captured");
   
-  // Generate preview
-  const exportContent = document.getElementById('exportContent');
-  exportContent.innerHTML = `
-    <div style="margin: 15px 0;">
-      <p><strong>Workflow with ${workflowSteps.length} steps</strong></p>
-      <p>Created on ${new Date().toLocaleDateString()}</p>
-      <p>Export format: HTML Document</p>
-    </div>
-    <div style="max-height: 300px; overflow-y: auto; border: 1px solid #eee; padding: 10px;">
-      ${workflowSteps.map((step, index) => `
-        <div style="margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid #eee;">
-          <strong>Step ${index + 1}:</strong> ${step.instruction || 'No instruction'}
-        </div>
-      `).join('')}
-    </div>
-  `;
+  // Get the input element
+  const element = event.target;
+  lastActionElement = element;
+  
+  // Generate a unique ID for this element
+  const elementId = element.id || element.name || `elem_${Math.random().toString(36).substr(2, 9)}`;
+  
+  // Clear any existing timeout for this element
+  if (pendingScreenshots.has(elementId)) {
+    clearTimeout(pendingScreenshots.get(elementId));
+  }
+  
+  // Set a new timeout
+  const timeoutId = setTimeout(async () => {
+    console.log("Input debounce triggered, capturing step for", elementId);
+    pendingScreenshots.delete(elementId);
+    
+    // Determine the element description
+    const elementInfo = getElementInfo(element);
+    
+    // Get the actual input value
+    const actualValue = element.value || element.innerText || '';
+    
+    // Check if field contains sensitive data
+    const isSensitive = isSensitiveField(element);
+    
+    // Create a masked value if needed
+    const maskedValue = isSensitive ? getMaskedValue(element) : actualValue;
+    
+    // Highlight the element
+    highlightElement(element);
+    const screenshot = await captureScreenshot();
+    removeHighlight();
+    
+    // Generate instruction with actual text for non-sensitive data
+    const instruction = generateInputInstruction(elementInfo, isSensitive, actualValue);
+    
+    // Create step data
+    const stepData = {
+      type: 'input',
+      url: window.location.href,
+      title: document.title,
+      timestamp: Date.now(),
+      elementInfo,
+      actualValue: isSensitive ? '[MASKED]' : actualValue,
+      maskedValue,
+      isSensitive,
+      instruction,
+      screenshot
+    };
+    
+    // Send step to background script
+    console.log("Sending input step to background");
+    chrome.runtime.sendMessage({
+      action: 'addStep',
+      data: stepData
+    }, response => {
+      if (response && response.success) {
+        console.log("Input step added successfully");
+      } else {
+        console.error("Failed to add input step:", response);
+      }
+    });
+  }, 1000); // Wait 1 second after typing stops
+  
+  pendingScreenshots.set(elementId, timeoutId);
 }
 
-// Close export modal
-function closeExportModal() {
-  exportModal.style.display = 'none';
+// Check if a field contains sensitive information
+function isSensitiveField(element) {
+  // Check the element type
+  if (element.type === 'password') return true;
+  
+  // Check element attributes
+  const sensitiveAttributes = ['password', 'secret', 'token', 'key', 'auth', 
+                             'ssn', 'social', 'creditcard', 'card', 'cvv', 'ccv', 
+                             'secure', 'private'];
+  
+  // Check various properties for sensitive terms
+  const checkProps = [
+    element.name,
+    element.id,
+    element.placeholder,
+    element.getAttribute('aria-label'),
+    element.className
+  ];
+  
+  // Look for sensitive terms in any properties
+  for (const prop of checkProps) {
+    if (!prop) continue;
+    
+    const lowerProp = prop.toLowerCase();
+    if (sensitiveAttributes.some(term => lowerProp.includes(term))) {
+      return true;
+    }
+  }
+  
+  // Check parent form field labels
+  if (element.id) {
+    const label = document.querySelector(`label[for="${element.id}"]`);
+    if (label && label.textContent) {
+      const labelText = label.textContent.toLowerCase();
+      if (sensitiveAttributes.some(term => labelText.includes(term))) {
+        return true;
+      }
+    }
+  }
+  
+  // Check for email pattern
+  if (element.value && element.value.match(/^[^@\s]+@[^@\s\.]+\.[^@\s]+$/)) {
+    return true;
+  }
+  
+  return false;
 }
 
-// Generate HTML document with workflow
-function generateHtml() {
-  // Create HTML content
-  let htmlContent = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SotoScribe Workflow Documentation</title>
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
-      max-width: 900px;
-      margin: 0 auto;
-      padding: 20px;
-      color: #333;
-      line-height: 1.5;
-    }
-    header {
-      text-align: center;
-      margin-bottom: 30px;
-      padding-bottom: 20px;
-      border-bottom: 1px solid #eee;
-    }
-    h1 {
-      color: #00635A;
-      margin-bottom: 10px;
-    }
-    .creation-date {
-      color: #666;
-      font-style: italic;
-    }
-    .step {
-      margin-bottom: 40px;
-      padding-bottom: 30px;
-      border-bottom: 1px solid #eee;
-    }
-    .step:last-child {
-      border-bottom: none;
-    }
-    .step-header {
-      display: flex;
-      align-items: center;
-      margin-bottom: 15px;
-    }
-    .step-number {
-      background-color: #00B3A4;
-      color: white;
-      font-weight: bold;
-      padding: 5px 10px;
-      border-radius: 20px;
-      margin-right: 10px;
-    }
-    .step-instruction {
-      font-size: 18px;
-      margin-bottom: 15px;
-    }
-    .step-metadata {
-      font-size: 14px;
-      color: #666;
-      margin-bottom: 15px;
-    }
-    .step-screenshot {
-      max-width: 100%;
-      height: auto;
-      border: 1px solid #ddd;
-      border-radius: 4px;
-    }
-    footer {
-      margin-top: 40px;
-      text-align: center;
-      color: #666;
-      font-size: 14px;
-    }
-  </style>
-</head>
-<body>
-  <header>
-    <h1>SotoScribe Workflow Documentation</h1>
-    <p class="creation-date">Created on ${new Date().toLocaleDateString()}</p>
-  </header>
+// Get masked value for sensitive fields
+function getMaskedValue(element) {
+  // Determine type of sensitive data
+  if (element.type === 'password') {
+    return '[PASSWORD]';
+  }
   
-  <main>
-`;
-
-  // Add each step
-  workflowSteps.forEach((step, index) => {
-    htmlContent += `
-    <div class="step">
-      <div class="step-header">
-        <div class="step-number">${index + 1}</div>
-        <h2>${step.instruction || 'No instruction'}</h2>
-      </div>
-      
-      <div class="step-metadata">
-        <p><strong>Page:</strong> ${step.title || 'Untitled Page'}</p>
-        <p><strong>URL:</strong> ${step.url || 'Unknown URL'}</p>
-      </div>
-      
-      ${step.screenshot ? `<img class="step-screenshot" src="${step.screenshot}" alt="Step ${index + 1} screenshot">` : '<p>[No screenshot available]</p>'}
-    </div>
-  `;
-  });
-
-  // Close HTML structure
-  htmlContent += `
-  </main>
+  if (element.value && element.value.match(/^[^@\s]+@[^@\s\.]+\.[^@\s]+$/)) {
+    return '[EMAIL]';
+  }
   
-  <footer>
-    <p>Generated with SotoScribe - Workflow Documentation Tool</p>
-  </footer>
-</body>
-</html>`;
-
-  return htmlContent;
+  // Check for credit card pattern (simplified)
+  if (element.value && element.value.match(/^\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}$/)) {
+    return '[CREDIT CARD]';
+  }
+  
+  // Default mask
+  return '[SENSITIVE DATA]';
 }
 
-// Download export (HTML)
-async function downloadExport() {
-  // Change button text to show progress
-  const downloadBtn = document.getElementById('confirmExportBtn');
-  const originalText = downloadBtn.textContent;
+// Extract useful information about an element
+function getElementInfo(element) {
+  if (!element) return { tagName: 'unknown' };
   
-  // Add loading spinner
-  downloadBtn.innerHTML = '<span class="loader"></span>Generating HTML...';
-  downloadBtn.disabled = true;
+  // Get element tag name
+  const tagName = element.tagName ? element.tagName.toLowerCase() : 'unknown';
   
-  try {
-    // Generate HTML content
-    const htmlContent = generateHtml();
+  // Get element attributes
+  const attributes = {};
+  if (element.attributes) {
+    for (const attr of element.attributes) {
+      attributes[attr.name] = attr.value;
+    }
+  }
+  
+  // Get element text content
+  let textContent = element.textContent?.trim() || '';
+  if (textContent.length > 50) {
+    textContent = textContent.substring(0, 50) + '...';
+  }
+  
+  // Get element label if available
+  let label = '';
+  if (element.id) {
+    const labelElement = document.querySelector(`label[for="${element.id}"]`);
+    if (labelElement) {
+      label = labelElement.textContent.trim();
+    }
+  }
+  
+  // Get ARIA attributes which often contain better descriptions
+  const ariaLabel = element.getAttribute('aria-label');
+  const ariaLabelledBy = element.getAttribute('aria-labelledby');
+  let ariaText = '';
+  
+  if (ariaLabelledBy) {
+    const labelElement = document.getElementById(ariaLabelledBy);
+    if (labelElement) {
+      ariaText = labelElement.textContent.trim();
+    }
+  }
+  
+  // Determine the most descriptive name for the element
+  const elementName = 
+    label ||
+    ariaLabel ||
+    ariaText ||
+    element.getAttribute('placeholder') || 
+    element.getAttribute('name') ||
+    element.getAttribute('title') ||
+    element.value || 
+    (textContent && textContent.length < 30 ? textContent : '') ||
+    (element.id ? '#' + element.id : '') ||
+    tagName;
+  
+  // Get element role
+  const role = element.getAttribute('role') || '';
+  
+  // Get computed styles for better visibility
+  const styles = window.getComputedStyle(element);
+  const isVisible = styles.display !== 'none' && styles.visibility !== 'hidden' && styles.opacity !== '0';
+  
+  // Get element dimensions
+  const rect = element.getBoundingClientRect();
+  const dimensions = {
+    width: rect.width,
+    height: rect.height,
+    top: rect.top + window.scrollY,
+    left: rect.left + window.scrollX
+  };
+  
+  // Get element path for more precise identification
+  const path = getElementPath(element);
+  
+  return {
+    tagName,
+    attributes,
+    textContent,
+    elementName,
+    label,
+    ariaLabel,
+    role,
+    isVisible,
+    dimensions,
+    path
+  };
+}
+
+// Get a CSS selector path to the element
+function getElementPath(element, maxDepth = 3) {
+  if (!element || element === document.body || element === document || element === window) {
+    return '';
+  }
+  
+  let path = '';
+  let current = element;
+  let depth = 0;
+  
+  while (current && current !== document.body && current !== document && depth < maxDepth) {
+    let selector = current.tagName.toLowerCase();
     
-    // Create a blob with the HTML content
-    const blob = new Blob([htmlContent], { type: 'text/html' });
-    
-    // Create a download link
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `workflow-${Date.now()}.html`;
-    document.body.appendChild(a);
-    a.click();
-    
-    // Clean up
-    setTimeout(() => {
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }, 100);
-    
-    // Clear data after export
-    try {
-      chrome.runtime.sendMessage({ action: 'clearSteps' });
-    } catch (error) {
-      console.error("Error clearing steps:", error);
+    if (current.id) {
+      selector += `#${current.id}`;
+    } else if (current.className && typeof current.className === 'string') {
+      const classes = current.className.trim().split(/\s+/);
+      if (classes.length > 0) {
+        selector += `.${classes[0]}`;
+      }
     }
     
-    // Close modal
-    closeExportModal();
+    path = path ? `${selector} > ${path}` : selector;
+    current = current.parentElement;
+    depth++;
+  }
+  
+  return path;
+}
+
+// Create a keyboard shortcut string (e.g., "Ctrl + C")
+function generateKeyboardShortcut(event) {
+  const keys = [];
+  
+  if (event.ctrlKey) keys.push('Ctrl');
+  if (event.shiftKey) keys.push('Shift');
+  if (event.altKey) keys.push('Alt');
+  if (event.metaKey) keys.push('Command');
+  
+  // Get the key name
+  let keyName = event.key;
+  if (keyName === ' ') keyName = 'Space';
+  if (keyName.length === 1) keyName = keyName.toUpperCase();
+  
+  keys.push(keyName);
+  
+  return keys.join(' + ');
+}
+
+// Generate a click instruction
+function generateClickInstruction(elementInfo) {
+  let instructionText = '';
+  
+  // Get additional details for better description
+  const elementText = elementInfo.elementName || 'element';
+  const elementType = elementInfo.tagName || 'element';
+  const elementRole = elementInfo.role || '';
+  
+  // Build a more detailed instruction based on element type
+  if (elementInfo.tagName === 'button' || 
+      elementInfo.tagName === 'a' || 
+      elementRole === 'button') {
+    instructionText = `Click the **${elementText}** button`;
+  } else if (elementInfo.tagName === 'input' && elementInfo.attributes.type === 'checkbox') {
+    const action = elementInfo.attributes.checked ? 'Check' : 'Uncheck';
+    instructionText = `${action} the **${elementInfo.label || elementText}** checkbox`;
+  } else if (elementInfo.tagName === 'input' && elementInfo.attributes.type === 'radio') {
+    instructionText = `Select the **${elementInfo.label || elementText}** radio option`;
+  } else if (elementInfo.tagName === 'select') {
+    instructionText = `Open the **${elementInfo.label || elementText}** dropdown menu`;
+  } else if (elementInfo.tagName === 'option') {
+    instructionText = `Select **${elementText}** from the dropdown menu`;
+  } else if (elementInfo.tagName === 'input' && elementInfo.attributes.type === 'submit') {
+    instructionText = `Click the **${elementText}** submit button`;
+  } else if (elementInfo.tagName === 'input' && elementInfo.attributes.type === 'file') {
+    instructionText = `Click to upload a file to the **${elementInfo.label || elementText}** field`;
+  } else if (elementInfo.tagName === 'img') {
+    instructionText = `Click on the ${elementInfo.attributes.alt ? `**${elementInfo.attributes.alt}**` : '**image**'}`;
+  } else if (elementInfo.tagName === 'li' || elementRole === 'listitem') {
+    instructionText = `Click on the **${elementText}** list item`;
+  } else if (elementInfo.tagName === 'td' || elementInfo.tagName === 'th') {
+    instructionText = `Click on the **${elementText}** table cell`;
+  } else if (elementRole === 'tab') {
+    instructionText = `Click on the **${elementText}** tab`;
+  } else if (elementRole === 'menuitem') {
+    instructionText = `Click on the **${elementText}** menu item`;
+  } else {
+    // More detailed description for other elements
+    const typeName = elementType === 'div' || elementType === 'span' ? 'element' : elementType;
+    instructionText = `Click on the **${elementText}** ${typeName}`;
+  }
+  
+  return instructionText;
+}
+
+// Generate an input instruction
+function generateInputInstruction(elementInfo, isSensitive, actualValue) {
+  let fieldName = elementInfo.label || 
+                  elementInfo.ariaLabel ||
+                  elementInfo.attributes.placeholder || 
+                  elementInfo.attributes.name ||
+                  elementInfo.attributes.id ||
+                  'this field';
+  
+  if (isSensitive) {
+    return `Enter sensitive information in the **${fieldName}** field`;
+  } else {
+    // Truncate very long values
+    const displayValue = actualValue.length > 30 ? 
+                          actualValue.substring(0, 30) + '...' : 
+                          actualValue;
     
-    // Show success message
-    alert(`Workflow exported successfully as HTML. All temporary data has been cleared.`);
-    
-    // Close the editor tab
-    window.close();
-  } catch (error) {
-    console.error(`Error during HTML export:`, error);
-    alert(`Error generating HTML: ${error.message}`);
-  } finally {
-    // Reset button
-    downloadBtn.innerHTML = originalText;
-    downloadBtn.disabled = false;
+    return `Type "${displayValue}" in the **${fieldName}** field`;
   }
 }
+
+// Highlight an element with a distinctive overlay and add a red dot at click position
+function highlightElement(element, clickX, clickY) {
+  if (!element) return;
+  
+  // Remove existing highlight if any
+  removeHighlight();
+  
+  // Create overlay
+  highlightOverlay = document.createElement('div');
+  
+  // Get element position
+  const rect = element.getBoundingClientRect();
+  
+  // Style the overlay
+  highlightOverlay.style.position = 'absolute';
+  highlightOverlay.style.left = rect.left + window.scrollX + 'px';
+  highlightOverlay.style.top = rect.top + window.scrollY + 'px';
+  highlightOverlay.style.width = rect.width + 'px';
+  highlightOverlay.style.height = rect.height + 'px';
+  highlightOverlay.style.border = '3px solid #00B3A4';
+  highlightOverlay.style.boxSizing = 'border-box';
+  highlightOverlay.style.pointerEvents = 'none';
+  highlightOverlay.style.zIndex = '999999';
+  
+  // Add a pulse animation for better visibility
+  highlightOverlay.style.animation = 'sotoscribe-pulse 1s infinite';
+  
+  // Create and add the animation style if not already present
+  if (!document.getElementById('sotoscribe-highlight-style')) {
+    const style = document.createElement('style');
+    style.id = 'sotoscribe-highlight-style';
+      // For stylesheets, we need to use textContent to safely set CSS content
+    style.textContent = `
+      @keyframes sotoscribe-pulse {
+        0% { box-shadow: 0 0 0 0 rgba(0, 179, 164, 0.4); }
+        70% { box-shadow: 0 0 0 10px rgba(0, 179, 164, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(0, 179, 164, 0); }
+      }
+    `;
+// Using textContent for CSS is secure as it doesn't parse HTML and treats the content as plain text
+    document.head.appendChild(style);
+  }
+  
+  // Add to document
+  document.body.appendChild(highlightOverlay);
+  
+  // Create a red dot at the click position
+  const redDot = document.createElement('div');
+  redDot.id = 'sotoscribe-click-dot';
+  redDot.style.position = 'absolute';
+  redDot.style.left = (clickX || (rect.left + rect.width/2)) + window.scrollX + 'px';
+  redDot.style.top = (clickY || (rect.top + rect.height/2)) + window.scrollY + 'px';
+  redDot.style.width = '20px';
+  redDot.style.height = '20px';
+  redDot.style.backgroundColor = 'rgba(255, 0, 0, 0.2)'; // Very transparent red (0.2 alpha)
+  redDot.style.boxShadow = '0 0 0 3px rgba(255, 0, 0, 0.4)'; // Slightly more visible outline
+  redDot.style.borderRadius = '50%';
+  redDot.style.transform = 'translate(-50%, -50%)';
+  redDot.style.zIndex = '9999999';
+  redDot.style.pointerEvents = 'none';
+  
+  // Add to document
+  document.body.appendChild(redDot);
+}
+
+// Remove the highlight overlay and red dot
+function removeHighlight() {
+  if (highlightOverlay && highlightOverlay.parentNode) {
+    highlightOverlay.parentNode.removeChild(highlightOverlay);
+  }
+  highlightOverlay = null;
+  
+  // Also remove red dot if present
+  const redDot = document.getElementById('sotoscribe-click-dot');
+  if (redDot && redDot.parentNode) {
+    redDot.parentNode.removeChild(redDot);
+  }
+}
+
+// Capture a screenshot of the current page with throttling
+async function captureScreenshot() {
+  return new Promise((resolve, reject) => {
+    // Send request to background script
+    chrome.runtime.sendMessage({ action: 'captureScreenshot' }, (response) => {
+      if (response && response.screenshot) {
+        console.log("Screenshot received successfully");
+        resolve(response.screenshot);
+      } else {
+        console.error("Failed to get screenshot from background", response);
+        // Fallback: if we can't get a screenshot, we'll resolve with null
+        resolve(null);
+      }
+    });
+  });
+}
+
+// Message listener for commands from the background script
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  console.log("Content script received message:", message.action);
+  
+  if (message.action === 'startCapture') {
+    isCapturing = true;
+    sessionId = message.sessionId;
+    pageNavigations = [window.location.href]; // Reset navigation history
+    setupListeners();
+    
+    // Capture initial page load as a step after a short delay
+    setTimeout(async () => {
+      console.log("Capturing initial page load step");
+      const screenshot = await captureScreenshot();
+      
+      // Get more detailed page info
+      const pageInfo = {
+        url: window.location.href,
+        path: window.location.pathname,
+        query: window.location.search,
+        domain: window.location.hostname,
+        title: document.title
+      };
+      
+      // Create step data for page load
+      const stepData = {
+        type: 'navigate',
+        url: window.location.href,
+        title: document.title,
+        timestamp: Date.now(),
+        pageInfo,
+        instruction: `Navigate to **${document.title}** (${formatUrl(window.location.href)})`,
+        screenshot
+      };
+      
+      // Send step to background script
+      chrome.runtime.sendMessage({
+        action: 'addStep',
+        data: stepData
+      }, response => {
+        if (response && response.success) {
+          console.log("Initial navigation step added successfully");
+        } else {
+          console.error("Failed to add initial navigation step:", response);
+        }
+      });
+    }, 1000); // Wait 1 second to allow page to fully load
+    
+    sendResponse({ success: true });
+  } else if (message.action === 'stopCapture') {
+    isCapturing = false;
+    sessionId = null;
+    removeListeners();
+    removeHighlight();
+    
+    // Clear any pending timeouts
+    pendingScreenshots.forEach(timeoutId => clearTimeout(timeoutId));
+    pendingScreenshots.clear();
+    
+    sendResponse({ success: true });
+  }
+  
+  return true; // Required for async response
+});
+
+// Initialize the extension
+function initialize() {
+  console.log("Initializing content script");
+  // Check if we're already in capture mode (in case of page refresh)
+  chrome.runtime.sendMessage({ action: 'getState' }, (response) => {
+    if (response && response.isCapturing) {
+      console.log("Already in capture mode, setting up listeners");
+      isCapturing = true;
+      setupListeners();
+      
+      // Add current URL to navigation history
+      pageNavigations = [window.location.href];
+    } else {
+      console.log("Not in capture mode");
+    }
+  });
+}
+
+// Start the extension
+initialize();
