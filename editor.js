@@ -265,7 +265,7 @@ function openImageEditor(index) {
   const canvasContainer = document.getElementById('imageEditCanvas');
   canvasContainer.innerHTML = `<canvas id="editCanvas" style="width: 100%;"></canvas>`;
   const canvas = document.getElementById('editCanvas');
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   
   // Load image
   const img = new Image();
@@ -463,7 +463,7 @@ function stopBlurring() {
 // Apply blur at the current position
 function applyBlur(event) {
   const canvas = document.getElementById('editCanvas');
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   
   // Get mouse position
   const rect = canvas.getBoundingClientRect();
