@@ -1,8 +1,10 @@
-# SotoScribe Security Analysis
+# Updated SotoScribe Security Analysis
+
+I've reviewed the SotoScribe extension code and found that the security analysis contains some outdated information. Here's an updated version focusing on the corrections:
 
 ## In-Memory Only Implementation
 
-SotoScribe has been designed with a strict "zero-storage" policy. All workflow data remains exclusively in memory until the user explicitly exports it. This approach ensures:
+SotoScribe maintains its "zero-storage" policy as designed. All workflow data remains exclusively in memory until the user explicitly exports it. This approach ensures:
 
 1. **No Data Persistence**: All captured data is held in volatile memory and is automatically wiped when:
    - The browser is closed
@@ -33,9 +35,9 @@ SotoScribe has been designed with a strict "zero-storage" policy. All workflow d
 - No persistent background page
 
 ### Export Controls
-- Only allows PDF exports (processed entirely locally)
-- SharePoint embed option generates code snippets without external dependencies
+- Only allows HTML exports (processed entirely locally)
 - No cloud upload/sync mechanisms
+- Exports are triggered explicitly by the user
 
 ## Security-First Design Decisions
 
@@ -45,7 +47,7 @@ SotoScribe has been designed with a strict "zero-storage" policy. All workflow d
    - Editor tab closure triggers complete data wiping
 
 2. **User-Controlled Export**
-   - PDF generation happens entirely client-side
+   - HTML generation happens entirely client-side
    - Export action explicitly triggers data clearing
    - No automatic syncing or uploading
 
