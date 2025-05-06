@@ -43,6 +43,66 @@ let isSalesforceMode = false; // Flag for Salesforce-specific behavior
 let pendingScreenshots = new Map();
 const SCREENSHOT_THROTTLE_MS = 1000; // Minimum 1 second between screenshots
 
+// Check if we're in an iframe (to skip events in tracking pixels)
+function isInIframe() {
+  try {
+    return window !== window.top;
+  } catch (e) {
+    return true; // If we can't access window.top, we're probably in an iframe
+  }
+}
+
+// Track window focus state
+let windowHasFocus = document.hasFocus();
+
+// Update focus state
+window.addEventListener('focus', () => {
+  windowHasFocus = true;
+});
+
+window.addEventListener('blur', () => {
+  windowHasFocus = false;
+});
+
+// Track last actions to prevent duplicates
+let lastActionDetails = {
+  type: null,
+  elementPath: null,
+  timestamp: 0,
+  value: null
+};
+
+// Function to check if an action is a duplicate
+function isDuplicateAction(type, element, details = {}) {
+  const elementPath = element ? getElementPath(element) : null;
+  
+  // If it's the same type of action on the same element within 1 second
+  if (lastActionDetails.type === type && 
+      lastActionDetails.elementPath === elementPath &&
+      Date.now() - lastActionDetails.timestamp < 1000) {
+    
+    // For inputs, check if value is the same
+    if (type === 'input' && details.value !== undefined) {
+      return details.value === lastActionDetails.value;
+    }
+    
+    return true;
+  }
+  
+  // Update last action
+  lastActionDetails = {
+    type,
+    elementPath,
+    timestamp: Date.now(),
+    ...details
+  };
+  
+  return false;
+}
+
+// Debounce variable for Salesforce UI changes
+let salesforceUIChangeTimeout = null;
+
 // Wait for DOM to be fully ready before announcing ready state
 function waitForDocumentReady() {
   if (document.readyState === 'complete') {
@@ -114,28 +174,91 @@ function setupSalesforceObservers() {
   
   // Create observer for Lightning component changes
   const observer = new MutationObserver((mutations) => {
+    // Skip processing if window doesn't have focus or not capturing
+    if (!windowHasFocus || !isCapturing) {
+      return;
+    }
+    
+    let significantChanges = false;
+    
     for (const mutation of mutations) {
       // Look for added nodes that might be components being rendered
       if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
         // Look for meaningful changes like modal dialogs, popups, etc.
-        const significantChanges = Array.from(mutation.addedNodes).filter(node => {
+        const meaningfulChanges = Array.from(mutation.addedNodes).filter(node => {
           if (node.nodeType !== Node.ELEMENT_NODE) return false;
           
+          // Skip tiny elements (often tracking pixels)
+          if (node.getBoundingClientRect) {
+            const rect = node.getBoundingClientRect();
+            if (rect.width < 10 || rect.height < 10) {
+              return false;
+            }
+          }
+          
           // Check for significant component types
-          return node.classList && (
-            node.classList.contains('modal-container') ||
-            node.classList.contains('slds-modal') ||
-            node.classList.contains('slds-form') ||
-            node.classList.contains('forceDetailPanelDesktop') ||
-            node.querySelector('.slds-modal, .slds-form, .forceDetailPanelDesktop')
-          );
+          if (node.classList) {
+            // High-importance UI components
+            const significantClasses = [
+              'modal-container',
+              'slds-modal',
+              'slds-form',
+              'forceDetailPanelDesktop',
+              'slds-panel',
+              'slds-popover',
+              'runtime_sales_activitiesActivityPanel',
+              'forceListViewManagerGrid',
+              'forceRecordLayout'
+            ];
+            
+            for (const cls of significantClasses) {
+              if (node.classList.contains(cls) || node.querySelector(`.${cls}`)) {
+                return true;
+              }
+            }
+            
+            // Look for common Salesforce Lightning patterns
+            const lightningPattern = Array.from(node.classList).some(cls => 
+              cls.startsWith('forcePage') || 
+              cls.startsWith('force') || 
+              cls.startsWith('lightning') || 
+              cls.startsWith('slds-')
+            );
+            
+            if (lightningPattern && node.offsetHeight > 50) {
+              return true;
+            }
+          }
+          
+          // Check for known component attributes
+          if (node.getAttribute('data-component-id') || 
+              node.getAttribute('data-aura-rendered-by') ||
+              node.querySelector('[data-component-id], [data-aura-rendered-by]')) {
+            
+            // Make sure it's visible and substantial
+            if (node.offsetHeight > 100 || node.offsetWidth > 200) {
+              return true;
+            }
+          }
+          
+          return false;
         });
         
-        if (significantChanges.length > 0) {
-          console.log("Detected significant Salesforce UI change");
-          handleSalesforceUIChange();
+        if (meaningfulChanges.length > 0) {
+          significantChanges = true;
+          break;
         }
       }
+    }
+    
+    if (significantChanges) {
+      console.log("Detected significant Salesforce UI change");
+      
+      // Debounce UI changes to avoid capturing too many steps
+      clearTimeout(salesforceUIChangeTimeout);
+      salesforceUIChangeTimeout = setTimeout(() => {
+        handleSalesforceUIChange();
+      }, 500);
     }
   });
   
@@ -148,11 +271,26 @@ function setupSalesforceObservers() {
 
 // Handle Salesforce UI changes
 async function handleSalesforceUIChange() {
+  // Skip if not capturing or window doesn't have focus
+  if (!isCapturing || !windowHasFocus) {
+    return;
+  }
+  
   // Wait a moment for UI to settle
   await new Promise(resolve => setTimeout(resolve, 500));
   
+  // Check for duplicate action (we don't want to capture multiple UI changes)
+  if (isDuplicateAction('ui_change', null, { url: window.location.href })) {
+    console.log("Ignoring duplicate UI change");
+    return;
+  }
+  
   // Capture screenshot
   const screenshot = await captureScreenshot();
+  if (!screenshot) {
+    console.log("Failed to capture screenshot for UI change, skipping step");
+    return;
+  }
   
   // Create step data for UI change
   const stepData = {
@@ -207,17 +345,40 @@ async function handleUrlChange() {
   try {
     const currentUrl = window.location.href;
     
+    // Skip tracking domains
+    if (currentUrl.includes('analytics') || 
+        currentUrl.includes('tracker') || 
+        currentUrl.includes('pixel')) {
+      console.log("Skipping tracking URL:", currentUrl);
+      return;
+    }
+    
     // Check if this is a new URL
     if (pageNavigations.includes(currentUrl)) return;
     
     console.log("URL change detected:", currentUrl);
     pageNavigations.push(currentUrl);
     
+    // Skip if within 500ms of another URL change (debounce)
+    if (isDuplicateAction('navigate', null, { url: currentUrl })) {
+      console.log("Ignoring rapid URL change");
+      return;
+    }
+    
     // Wait a moment for page to render
     await new Promise(resolve => setTimeout(resolve, 500));
     
     // Capture screenshot
     const screenshot = await captureScreenshot();
+    if (!screenshot) {
+      console.log("Failed to capture screenshot for navigation, retrying...");
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const retryScreenshot = await captureScreenshot();
+      if (!retryScreenshot) {
+        console.error("Failed to capture screenshot for navigation after retry");
+        return;
+      }
+    }
     
     // Create step data for page navigation
     const stepData = {
@@ -226,7 +387,7 @@ async function handleUrlChange() {
       title: document.title,
       timestamp: Date.now(),
       instruction: `Navigate to **${document.title}** (${formatUrl(currentUrl)})`,
-      screenshot
+      screenshot: screenshot
     };
     
     // Send step to background script
@@ -265,16 +426,41 @@ async function handleClick(event) {
   if (!isCapturing) return;
   
   try {
+    // Skip if in iframe
+    if (isInIframe()) {
+      console.log("Ignoring click in iframe");
+      return;
+    }
+    
+    // Skip if window doesn't have focus
+    if (!windowHasFocus) {
+      console.log("Ignoring click while window doesn't have focus");
+      return;
+    }
+    
     // Skip programmatically triggered clicks
     if (!event.isTrusted) {
       console.log("Ignoring non-user click event");
       return;
     }
     
+    // Skip clicks on very small elements (often tracking pixels)
+    const element = event.target;
+    const rect = element.getBoundingClientRect();
+    if (rect.width < 5 || rect.height < 5) {
+      console.log("Ignoring click on tiny element");
+      return;
+    }
+    
+    // Check for duplicate clicks
+    if (isDuplicateAction('click', element)) {
+      console.log("Ignoring duplicate click action");
+      return;
+    }
+    
     console.log("Click event captured");
     
     // Get the clicked element
-    const element = event.target;
     lastActionElement = element;
     
     // Determine the element description
@@ -288,7 +474,6 @@ async function handleClick(event) {
     await new Promise(resolve => setTimeout(resolve, 100));
     const screenshot = await captureScreenshot();
     removeHighlight();
-
     
     // Generate instruction
     const instruction = generateClickInstruction(elementInfo);
@@ -336,9 +521,27 @@ async function handleFormSubmit(event) {
   if (!isCapturing) return;
   
   try {
+    // Skip if in iframe
+    if (isInIframe()) {
+      console.log("Ignoring form submission in iframe");
+      return;
+    }
+    
+    // Skip if window doesn't have focus
+    if (!windowHasFocus) {
+      console.log("Ignoring form submission while window doesn't have focus");
+      return;
+    }
+    
     // Skip programmatically triggered form submissions
     if (!event.isTrusted) {
       console.log("Ignoring non-user form submission");
+      return;
+    }
+    
+    // Check for duplicate submission
+    if (isDuplicateAction('form_submit', event.target)) {
+      console.log("Ignoring duplicate form submission");
       return;
     }
     
@@ -403,6 +606,18 @@ async function handleKeyDown(event) {
   if (!isCapturing) return;
   
   try {
+    // Skip if in iframe
+    if (isInIframe()) {
+      console.log("Ignoring keyboard event in iframe");
+      return;
+    }
+    
+    // Skip if window doesn't have focus
+    if (!windowHasFocus) {
+      console.log("Ignoring keyboard event while window doesn't have focus");
+      return;
+    }
+    
     // Skip programmatically triggered key events
     if (!event.isTrusted) {
       console.log("Ignoring non-user keyboard event");
@@ -412,6 +627,12 @@ async function handleKeyDown(event) {
     // Only capture keyboard shortcuts (with modifier keys)
     if (event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) {
       console.log("Keyboard shortcut captured");
+      
+      // Check for duplicate keyboard shortcut
+      if (isDuplicateAction('keyboard', document.activeElement)) {
+        console.log("Ignoring duplicate keyboard shortcut");
+        return;
+      }
       
       // Create a human-readable keyboard shortcut
       const shortcut = generateKeyboardShortcut(event);
@@ -465,6 +686,18 @@ function handleInput(event) {
   if (!isCapturing) return;
   
   try {
+    // Skip if in iframe
+    if (isInIframe()) {
+      console.log("Ignoring input in iframe");
+      return;
+    }
+    
+    // Skip if window doesn't have focus
+    if (!windowHasFocus) {
+      console.log("Ignoring input while window doesn't have focus");
+      return;
+    }
+    
     // Skip programmatically triggered input events
     if (!event.isTrusted) {
       console.log("Ignoring non-user input event");
@@ -490,11 +723,17 @@ function handleInput(event) {
       console.log("Input debounce triggered, capturing step for", elementId);
       pendingScreenshots.delete(elementId);
       
+      // Get actual input value
+      const actualValue = element.value || element.innerText || '';
+      
+      // Check for duplicate input with same value
+      if (isDuplicateAction('input', element, { value: actualValue })) {
+        console.log("Ignoring duplicate input action");
+        return;
+      }
+      
       // Determine the element description
       const elementInfo = getElementInfo(element);
-      
-      // Get the actual input value
-      const actualValue = element.value || element.innerText || '';
       
       // Check if field contains sensitive data
       const isSensitive = isSensitiveField(element);
@@ -1022,21 +1261,58 @@ function removeHighlight() {
   }
 }
 
-// Capture a screenshot of the current page with throttling
+// Capture a screenshot of the current page with improved error handling
 async function captureScreenshot() {
   try {
-    return new Promise((resolve, reject) => {
-      // Send request to background script
-      chrome.runtime.sendMessage({ action: 'captureScreenshot' }, (response) => {
-        if (response && response.screenshot) {
-          console.log("Screenshot received successfully");
-          resolve(response.screenshot);
-        } else {
-          console.error("Failed to get screenshot from background", response);
-          // Fallback: if we can't get a screenshot, we'll resolve with null
-          resolve(null);
-        }
-      });
+    return new Promise((resolve) => {
+      // Set timeout to avoid hanging
+      const timeoutId = setTimeout(() => {
+        console.warn("Screenshot capture timed out");
+        resolve(null); // Resolve with null on timeout instead of rejecting
+      }, 5000);
+      
+      // Try to get a screenshot up to 3 times
+      let attempts = 0;
+      const maxAttempts = 3;
+      
+      function attemptScreenshot() {
+        attempts++;
+        
+        // Send request to background script
+        chrome.runtime.sendMessage({ action: 'captureScreenshot' }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error("Screenshot error:", chrome.runtime.lastError);
+            
+            if (attempts < maxAttempts) {
+              // Try again after a short delay
+              setTimeout(attemptScreenshot, 300);
+            } else {
+              clearTimeout(timeoutId);
+              console.error("Failed to capture screenshot after multiple attempts");
+              resolve(null);
+            }
+            return;
+          }
+          
+          clearTimeout(timeoutId);
+          
+          if (response && response.screenshot) {
+            console.log("Screenshot received successfully");
+            resolve(response.screenshot);
+          } else {
+            if (attempts < maxAttempts) {
+              // Try again after a short delay
+              setTimeout(attemptScreenshot, 300);
+            } else {
+              console.error("Failed to get screenshot from background", response);
+              resolve(null);
+            }
+          }
+        });
+      }
+      
+      // Start the first attempt
+      attemptScreenshot();
     });
   } catch (error) {
     console.error("Error capturing screenshot:", error);
@@ -1062,8 +1338,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Capture initial page load as a step after a short delay
       setTimeout(async () => {
         try {
+          // Skip if in iframe
+          if (isInIframe()) {
+            console.log("Skipping initial capture in iframe");
+            return;
+          }
+          
           console.log("Capturing initial page load step");
           const screenshot = await captureScreenshot();
+          
+          // Skip if screenshot capture failed
+          if (!screenshot) {
+            console.error("Failed to capture initial screenshot, skipping initial step");
+            return;
+          }
           
           // Get more detailed page info
           const pageInfo = {
@@ -1112,6 +1400,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Clear any pending timeouts
       pendingScreenshots.forEach(timeoutId => clearTimeout(timeoutId));
       pendingScreenshots.clear();
+      
+      // Clear UI change timeout if any
+      if (salesforceUIChangeTimeout) {
+        clearTimeout(salesforceUIChangeTimeout);
+        salesforceUIChangeTimeout = null;
+      }
       
       sendResponse({ success: true });
     }
