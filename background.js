@@ -65,6 +65,75 @@ function isRestrictedUrl(url) {
   );
 }
 
+// Check if a URL is from a tracking or analytics domain
+function isTrackingDomain(url) {
+  try {
+    if (!url) return false;
+    
+    const urlObj = new URL(url);
+    const domain = urlObj.hostname.toLowerCase();
+    
+    // Explicit blacklist
+    const blacklistedDomains = [
+      'doubleclick.net',
+      'googletagmanager.com', 
+      'snapchat.com',
+      'google-analytics.com',
+      'facebook.com/tr',
+      'quantserve.com',
+      'adnxs.com',
+      'adsrvr.org',
+      'scorecardresearch.com',
+      'pixel.tapad.com',
+      'insight.adsrvr.org'
+    ];
+    
+    // Check for explicit matches
+    if (blacklistedDomains.some(blocked => domain.includes(blocked))) {
+      return true;
+    }
+    
+    // Check for telltale patterns
+    const trackingPatterns = [
+      'analytics', 
+      'tracker', 
+      'pixel', 
+      'tag', 
+      'metrics', 
+      'beacon',
+      'telemetry',
+      'collect',
+      'stats'
+    ];
+    
+    if (trackingPatterns.some(pattern => domain.includes(pattern))) {
+      return true;
+    }
+    
+    // Check pathname for tracking patterns
+    const path = urlObj.pathname.toLowerCase();
+    const trackingPaths = [
+      '/track',
+      '/pixel',
+      '/collect',
+      '/analytics',
+      '/beacon',
+      '/hit',
+      '/event',
+      '/log'
+    ];
+    
+    if (trackingPaths.some(pattern => path.includes(pattern))) {
+      return true;
+    }
+    
+    return false;
+  } catch (error) {
+    console.error("Error checking tracking domain:", error);
+    return false; // Default to not tracking on error
+  }
+}
+
 // Check if URL is a Salesforce Lightning URL
 function isSalesforceUrl(url) {
   return url && url.includes('lightning.force.com');
@@ -106,6 +175,16 @@ async function startCapture() {
     
     // We'll still mark as capturing but won't try to inject scripts
     // This allows capture to start when user navigates to a supported page
+    return;
+  }
+  
+  // Check if this is a tracking domain (don't start capture on tracking pages)
+  if (isTrackingDomain(tab.url)) {
+    console.log("Cannot start capture on tracking domain:", tab.url);
+    await chrome.action.setBadgeText({ text: "WAIT" });
+    await chrome.action.setBadgeBackgroundColor({ color: "#FFA000" });
+    
+    // Still mark as capturing, but don't inject scripts yet
     return;
   }
   
@@ -216,6 +295,14 @@ function startScreenshotBasedCapture(tabId) {
       // Detect URL changes
       if (tab.url !== lastUrl) {
         console.log("URL change detected:", tab.url);
+        
+        // Skip tracking domains
+        if (isTrackingDomain(tab.url)) {
+          console.log("Skipping tracking domain:", tab.url);
+          lastUrl = tab.url; // Update lastUrl to avoid capturing it again
+          return;
+        }
+        
         lastUrl = tab.url;
         
         // Add navigation step
@@ -399,6 +486,12 @@ async function captureTabScreenshotImpl() {
     return null;
   }
   
+  // Check if this is a tracking domain
+  if (isTrackingDomain(tab.url)) {
+    console.log("Skipping screenshot of tracking domain:", tab.url);
+    return null;
+  }
+  
   // Capture the visible area of the tab
   return await chrome.tabs.captureVisibleTab(null, { format: 'png' });
 }
@@ -421,9 +514,14 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   // Only process if we're in capture mode and URL has changed
   if (captureState.isCapturing && changeInfo.url) {
     const isRestricted = isRestrictedUrl(changeInfo.url);
+    const isTracking = isTrackingDomain(changeInfo.url);
     
     if (isRestricted) {
       console.log("Tab navigated to restricted URL:", changeInfo.url);
+      chrome.action.setBadgeText({ text: "WAIT" });
+      chrome.action.setBadgeBackgroundColor({ color: "#FFA000" });
+    } else if (isTracking) {
+      console.log("Tab navigated to tracking domain:", changeInfo.url);
       chrome.action.setBadgeText({ text: "WAIT" });
       chrome.action.setBadgeBackgroundColor({ color: "#FFA000" });
     } else {
@@ -523,6 +621,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case "addStep":
       if (captureState.isCapturing) {
         console.log("Adding step:", message.data.type);
+        
+        // Skip steps from tracking domains
+        if (message.data.url && isTrackingDomain(message.data.url)) {
+          console.log("Skipping step from tracking domain:", message.data.url);
+          sendResponse({ success: false, error: "Tracking domain" });
+          break;
+        }
+        
+        // Check for duplicate steps (within a short timeframe and with same type)
+        const isDuplicate = captureState.steps.some(step => 
+          step.type === message.data.type && 
+          step.url === message.data.url && 
+          Math.abs(step.timestamp - message.data.timestamp) < 1000
+        );
+        
+        if (isDuplicate) {
+          console.log("Skipping duplicate step");
+          sendResponse({ success: false, error: "Duplicate step" });
+          break;
+        }
+        
         captureState.steps.push(message.data);
         sendResponse({ success: true, stepCount: captureState.steps.length });
       } else {
