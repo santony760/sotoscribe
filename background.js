@@ -20,7 +20,9 @@
 let captureState = {
   isCapturing: false,
   sessionId: null,
-  steps: []
+  steps: [],
+  readyTabs: {}, // Track tabs with ready content scripts
+  captureInterval: null // For screenshot interval tracking
 };
 
 // Rate limiting for screenshot capture
@@ -30,15 +32,28 @@ let pendingScreenshotRequests = [];
 
 // Initialize fresh state
 function resetState() {
+  // Clear any existing intervals
+  if (captureState.captureInterval) {
+    clearInterval(captureState.captureInterval);
+  }
+  
   captureState = {
     isCapturing: false,
     sessionId: null,
-    steps: []
+    steps: [],
+    readyTabs: {}, // Preserve ready tabs information
+    captureInterval: null
   };
 }
 
 // Check if a URL is a restricted browser system URL
 function isRestrictedUrl(url) {
+  // If it's your Salesforce instance, explicitly allow it
+  if (url && url.includes('icertis.lightning.force.com')) {
+    return false; // Not restricted - allow this domain
+  }
+  
+  // Otherwise check against standard restricted URLs
   return url && (
     url.startsWith('chrome://') || 
     url.startsWith('edge://') ||
@@ -48,6 +63,26 @@ function isRestrictedUrl(url) {
     url.startsWith('view-source:') ||
     url.startsWith('file://')
   );
+}
+
+// Check if URL is a Salesforce Lightning URL
+function isSalesforceUrl(url) {
+  return url && url.includes('lightning.force.com');
+}
+
+// Format URL for display
+function formatUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    const domain = urlObj.hostname;
+    const path = urlObj.pathname;
+    const query = urlObj.search;
+    
+    // Return formatted URL with path and query parameters
+    return `${domain}${path}${query ? query.substring(0, 30) + (query.length > 30 ? '...' : '') : ''}`;
+  } catch (e) {
+    return url;
+  }
 }
 
 // Start a new capture session
@@ -85,22 +120,136 @@ async function startCapture() {
     console.error("Error injecting session indicator:", error);
   }
   
-  // Notify content script
-  try {
-    await chrome.tabs.sendMessage(tab.id, {
-      action: "startCapture",
-      sessionId: captureState.sessionId
-    });
-    console.log("Start message sent to content script");
-  } catch (error) {
-    console.error("Error sending start message to content script:", error);
-    // This is often expected on initial load, content script might not be ready yet
+  // Check if this is a Salesforce page
+  const isSalesforce = isSalesforceUrl(tab.url);
+  
+  // Notify content script - with retry mechanism
+  let retryAttempt = 0;
+  const maxRetries = 3;
+  
+  async function tryConnectToContentScript() {
+    try {
+      console.log(`Connection attempt ${retryAttempt + 1} to content script`);
+      
+      // Check if we know this tab has a content script ready
+      const isContentScriptReady = captureState.readyTabs && captureState.readyTabs[tab.id];
+      
+      chrome.tabs.sendMessage(tab.id, {
+        action: "startCapture",
+        sessionId: captureState.sessionId,
+        isSalesforce: isSalesforce // Tell content script if this is Salesforce
+      }, response => {
+        if (chrome.runtime.lastError) {
+          console.warn("Content script connection error:", chrome.runtime.lastError);
+          
+          // If we've tried enough times, use fallback approach for Salesforce
+          if (retryAttempt >= maxRetries) {
+            console.log("Max retries reached, using fallback approach");
+            if (isSalesforce) {
+              startScreenshotBasedCapture(tab.id);
+            }
+          } else {
+            // Try again after delay
+            retryAttempt++;
+            setTimeout(tryConnectToContentScript, 1000);
+          }
+        } else {
+          console.log("Start message sent to content script successfully");
+          
+          // For Salesforce, also start screenshot-based capture as a backup
+          if (isSalesforce) {
+            console.log("Also starting screenshot capture for Salesforce");
+            startScreenshotBasedCapture(tab.id);
+          }
+        }
+      });
+    } catch (error) {
+      console.error("Error sending message to content script:", error);
+      
+      // Fall back to screenshot approach for Salesforce
+      if (isSalesforce) {
+        startScreenshotBasedCapture(tab.id);
+      }
+    }
   }
+  
+  // Try to connect to content script
+  tryConnectToContentScript();
   
   // Update UI
   await chrome.action.setBadgeText({ text: "REC" });
   await chrome.action.setBadgeBackgroundColor({ color: "#00B3A4" });
   console.log("Capture session started successfully");
+}
+
+// Start screenshot-based capture mode (primarily for Salesforce)
+function startScreenshotBasedCapture(tabId) {
+  console.log("Starting screenshot-based capture mode");
+  
+  let lastUrl = null;
+  let lastScreenshotData = null;
+  
+  // Set up interval for periodic screenshots
+  const screenshotInterval = setInterval(async () => {
+    if (!captureState.isCapturing) {
+      clearInterval(screenshotInterval);
+      return;
+    }
+    
+    try {
+      // Get current tab info
+      const tab = await chrome.tabs.get(tabId);
+      
+      // Check if tab still exists
+      if (!tab) {
+        console.log("Tab no longer exists, stopping screenshot capture");
+        clearInterval(screenshotInterval);
+        return;
+      }
+      
+      // Capture screenshot
+      const screenshot = await captureTabScreenshot();
+      
+      // Skip if no screenshot (might be on restricted page)
+      if (!screenshot) return;
+      
+      // Detect URL changes
+      if (tab.url !== lastUrl) {
+        console.log("URL change detected:", tab.url);
+        lastUrl = tab.url;
+        
+        // Add navigation step
+        captureState.steps.push({
+          type: 'navigate',
+          url: tab.url,
+          title: tab.title,
+          timestamp: Date.now(),
+          instruction: `Navigate to **${tab.title}** (${formatUrl(tab.url)})`,
+          screenshot
+        });
+      } 
+      // Only add screenshot step if it looks different from the last one
+      // Skip identical screenshots to avoid bloat
+      else if (!lastScreenshotData || screenshot !== lastScreenshotData) {
+        lastScreenshotData = screenshot;
+        
+        // Add a screen state step
+        captureState.steps.push({
+          type: 'screen_state',
+          url: tab.url,
+          title: tab.title,
+          timestamp: Date.now(),
+          instruction: `View of ${tab.title}`,
+          screenshot
+        });
+      }
+    } catch (error) {
+      console.error("Error in screenshot capture:", error);
+    }
+  }, 1500); // Every 1.5 seconds - similar to commercial tools
+  
+  // Store the interval for cleanup
+  captureState.captureInterval = screenshotInterval;
 }
 
 // Stop the current capture session
@@ -109,6 +258,12 @@ async function stopCapture() {
   if (!captureState.isCapturing) return;
   
   captureState.isCapturing = false;
+  
+  // Clear any running capture intervals
+  if (captureState.captureInterval) {
+    clearInterval(captureState.captureInterval);
+    captureState.captureInterval = null;
+  }
   
   // Get current tab
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -128,8 +283,14 @@ async function stopCapture() {
     
     // Notify content script
     try {
-      await chrome.tabs.sendMessage(tab.id, { action: "stopCapture" });
-      console.log("Stop message sent to content script");
+      await chrome.tabs.sendMessage(tab.id, { action: "stopCapture" }, response => {
+        // Handle potential error, but proceed regardless
+        if (chrome.runtime.lastError) {
+          console.warn("Warning when stopping content script:", chrome.runtime.lastError);
+        } else {
+          console.log("Stop message sent to content script");
+        }
+      });
     } catch (error) {
       console.error("Error sending stop message to content script:", error);
     }
@@ -270,6 +431,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       chrome.action.setBadgeText({ text: "REC" });
       chrome.action.setBadgeBackgroundColor({ color: "#00B3A4" });
       
+      // Check if this is Salesforce
+      const isSalesforce = isSalesforceUrl(changeInfo.url);
+      
       // Try to re-establish content script connection after a delay
       // This gives the content script time to load
       setTimeout(() => {
@@ -277,13 +441,24 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
           try {
             chrome.tabs.sendMessage(tabId, {
               action: "startCapture",
-              sessionId: captureState.sessionId
+              sessionId: captureState.sessionId,
+              isSalesforce: isSalesforce
+            }, response => {
+              if (chrome.runtime.lastError) {
+                console.warn("Content script reconnection warning:", chrome.runtime.lastError.message);
+                // If Salesforce, use screenshot approach
+                if (isSalesforce) {
+                  startScreenshotBasedCapture(tabId);
+                }
+              } else {
+                console.log("Successfully reconnected to content script");
+              }
             });
           } catch (error) {
             console.error("Error reconnecting to content script:", error);
           }
         }
-      }, 500);
+      }, 1000); // Increased from 500ms to 1000ms
     }
   }
 });
@@ -293,6 +468,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log("Background received message:", message.action);
   
   switch (message.action) {
+    case "contentScriptLoaded":
+      console.log("Content script loaded on:", message.url);
+      // Store which tabs have content scripts ready
+      if (sender.tab) {
+        captureState.readyTabs[sender.tab.id] = true;
+      }
+      sendResponse({ acknowledged: true });
+      break;
+      
+    case "contentScriptReady":
+      console.log("Content script ready on:", message.url);
+      // If we're capturing and this tab just got ready, send the start message
+      if (captureState.isCapturing && sender.tab && 
+          sender.tab.active) {
+        chrome.tabs.sendMessage(sender.tab.id, {
+          action: "startCapture",
+          sessionId: captureState.sessionId,
+          isSalesforce: isSalesforceUrl(message.url)
+        }, response => {
+          if (chrome.runtime.lastError) {
+            console.warn("Warning sending start to ready script:", chrome.runtime.lastError);
+          }
+        });
+      }
+      sendResponse({ acknowledged: true });
+      break;
+      
     case "startCapture":
       startCapture().then(() => {
         sendResponse({ success: true });
@@ -361,6 +563,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     // Editor was closed, clean up data
     console.log("Editor tab closed, cleaning up data");
     resetState();
+  }
+  
+  // Also remove from readyTabs if it exists
+  if (captureState.readyTabs && captureState.readyTabs[tabId]) {
+    delete captureState.readyTabs[tabId];
   }
 });
 
