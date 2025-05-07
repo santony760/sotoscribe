@@ -9,7 +9,10 @@
     "tabs"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "<all_urls>",
+    "*://*.salesforce.com/*",
+    "*://*.lightning.force.com/*",
+    "*://*.visual.force.com/*"
   ],
   "action": {
     "default_popup": "popup.html",
@@ -23,15 +26,14 @@
     "service_worker": "background.js",
     "type": "module"
   },
-
-"content_scripts": [
-  {
-    "matches": ["<all_urls>"],
-    "js": ["content.js"],
-    "run_at": "document_idle",
-    "all_frames": true  
-  }
-],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
   "web_accessible_resources": [
     {
       "resources": ["editor.html"],
