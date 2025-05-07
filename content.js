@@ -121,7 +121,8 @@ function announceReady() {
   // Try to detect if we're in Salesforce
   const isSalesforce = 
     window.location.href.includes('lightning.force.com') || 
-    document.querySelector('.desktop, .oneApp, .slds-scope') !== null;
+    window.location.href.includes('salesforce.com') ||
+    document.querySelector('.desktop, .oneApp, .slds-scope, .lightningContainer') !== null;
   
   chrome.runtime.sendMessage({ 
     action: 'contentScriptReady', 
@@ -168,9 +169,82 @@ function setupListeners() {
   }
 }
 
+// Function to find elements within Shadow DOM
+function querySelectorAllDeep(selector, root = document) {
+  // Start with regular DOM elements
+  let results = Array.from(root.querySelectorAll(selector));
+  
+  // Get all shadow roots and recursively search within them
+  const shadowRoots = [];
+  const collectShadowRoots = (node) => {
+    if (node.shadowRoot) {
+      shadowRoots.push(node.shadowRoot);
+    }
+    if (node.querySelectorAll) {
+      Array.from(node.querySelectorAll('*')).forEach(collectShadowRoots);
+    }
+  };
+  
+  collectShadowRoots(root);
+  
+  // Search within each shadow root
+  shadowRoots.forEach(shadowRoot => {
+    results = results.concat(Array.from(shadowRoot.querySelectorAll(selector)));
+    
+    // Recursively search in nested shadow DOMs
+    results = results.concat(querySelectorAllDeep(selector, shadowRoot));
+  });
+  
+  return results;
+}
+
+// Helper function to get elements within shadow DOM
+function getShadowElements(root, selector) {
+  let elements = [];
+  
+  function traverse(node) {
+    // Check if the node has a shadow root
+    if (node.shadowRoot) {
+      // Look for matching elements in this shadow root
+      const shadowMatches = node.shadowRoot.querySelectorAll(selector);
+      elements = elements.concat(Array.from(shadowMatches));
+      
+      // Traverse children of the shadow root
+      Array.from(node.shadowRoot.children).forEach(traverse);
+    }
+    
+    // Traverse regular DOM children
+    if (node.children) {
+      Array.from(node.children).forEach(traverse);
+    }
+  }
+  
+  traverse(root);
+  return elements;
+}
+
+// Get Aura component ID for an element
+function getAuraElementId(element) {
+  // Check for data attribute
+  if (element.getAttribute('data-aura-rendered-by')) {
+    return element.getAttribute('data-aura-rendered-by');
+  }
+  
+  // Try to find parent with aura ID
+  let current = element;
+  while (current && current !== document.body) {
+    if (current.getAttribute('data-aura-rendered-by')) {
+      return current.getAttribute('data-aura-rendered-by');
+    }
+    current = current.parentElement;
+  }
+  
+  return null;
+}
+
 // Set up Salesforce-specific DOM observers
 function setupSalesforceObservers() {
-  console.log("Setting up Salesforce-specific observers");
+  console.log("Setting up enhanced Salesforce-specific observers");
   
   // Create observer for Lightning component changes
   const observer = new MutationObserver((mutations) => {
@@ -196,6 +270,13 @@ function setupSalesforceObservers() {
             }
           }
           
+          // Check for LWC components
+          if (node.tagName && node.tagName.includes('-')) {
+            if (node.offsetHeight > 50) {
+              return true;
+            }
+          }
+          
           // Check for significant component types
           if (node.classList) {
             // High-importance UI components
@@ -208,7 +289,9 @@ function setupSalesforceObservers() {
               'slds-popover',
               'runtime_sales_activitiesActivityPanel',
               'forceListViewManagerGrid',
-              'forceRecordLayout'
+              'forceRecordLayout',
+              'oneContent',
+              'oneWorkspace'
             ];
             
             for (const cls of significantClasses) {
@@ -222,7 +305,8 @@ function setupSalesforceObservers() {
               cls.startsWith('forcePage') || 
               cls.startsWith('force') || 
               cls.startsWith('lightning') || 
-              cls.startsWith('slds-')
+              cls.startsWith('slds-') ||
+              cls.startsWith('uiPanel')
             );
             
             if (lightningPattern && node.offsetHeight > 50) {
@@ -233,10 +317,11 @@ function setupSalesforceObservers() {
           // Check for known component attributes
           if (node.getAttribute('data-component-id') || 
               node.getAttribute('data-aura-rendered-by') ||
-              node.querySelector('[data-component-id], [data-aura-rendered-by]')) {
+              node.getAttribute('lightning-component-id') ||
+              node.querySelector('[data-component-id], [data-aura-rendered-by], [lightning-component-id]')) {
             
             // Make sure it's visible and substantial
-            if (node.offsetHeight > 100 || node.offsetWidth > 200) {
+            if (node.offsetHeight > 50 || node.offsetWidth > 100) {
               return true;
             }
           }
@@ -265,8 +350,18 @@ function setupSalesforceObservers() {
   // Start observing the document with the configured parameters
   observer.observe(document.body, { 
     childList: true, 
-    subtree: true
+    subtree: true,
+    attributes: true, 
+    attributeFilter: ['class', 'style', 'data-component-id']
   });
+  
+  // Monitor for Lightning navigation events
+  if (window.addEventListener) {
+    window.addEventListener('lightning.navigation', () => {
+      console.log("Lightning navigation event detected");
+      setTimeout(handleUrlChange, 500);
+    });
+  }
 }
 
 // Handle Salesforce UI changes
@@ -973,14 +1068,16 @@ function getSalesforceElementInfo(element) {
     const info = {};
     
     // Look for Lightning component containers
-    const lightningComponent = element.closest('[data-component-id], [data-aura-rendered-by]');
+    const lightningComponent = element.closest('[data-component-id], [data-aura-rendered-by], [lightning-component-id]');
     if (lightningComponent) {
       info.componentId = lightningComponent.getAttribute('data-component-id') || 
-                        lightningComponent.getAttribute('data-aura-rendered-by');
+                        lightningComponent.getAttribute('data-aura-rendered-by') ||
+                        lightningComponent.getAttribute('lightning-component-id');
       
       // Try to determine component type
       const componentType = 
         lightningComponent.getAttribute('data-component-type') ||
+        lightningComponent.getAttribute('data-component-name') ||
         (lightningComponent.classList && Array.from(lightningComponent.classList)
           .find(cls => cls.startsWith('forcePage') || cls.startsWith('force') || cls.startsWith('lightning')));
       
@@ -1006,12 +1103,35 @@ function getSalesforceElementInfo(element) {
       }
     }
     
-    // Check for Salesforce field labels (often in nearby spans or labels)
+    // Check for Salesforce field labels with improved shadow DOM handling
     const fieldLabel = element.closest('.slds-form-element');
     if (fieldLabel) {
-      const labelElement = fieldLabel.querySelector('.slds-form-element__label');
+      // Check in regular DOM first
+      let labelElement = fieldLabel.querySelector('.slds-form-element__label');
+      
+      // If not found, try to look in shadow DOM
+      if (!labelElement) {
+        const shadowElements = getShadowElements(fieldLabel, '.slds-form-element__label');
+        if (shadowElements.length > 0) {
+          labelElement = shadowElements[0];
+        }
+      }
+      
       if (labelElement) {
         info.label = labelElement.textContent.trim();
+      }
+    }
+    
+    // Handle Lightning Aura components
+    if (window.$A && element.closest('.oneApp')) {
+      try {
+        // Try to get Aura component ID
+        const auraId = getAuraElementId(element);
+        if (auraId) {
+          info.auraId = auraId;
+        }
+      } catch (e) {
+        console.log("Error accessing Aura component:", e);
       }
     }
     
@@ -1439,12 +1559,29 @@ function initialize() {
       pageNavigations = [window.location.href];
       
       // Check if we're on Salesforce
-      isSalesforceMode = window.location.href.includes('lightning.force.com');
+      isSalesforceMode = window.location.href.includes('lightning.force.com') || 
+                        window.location.href.includes('salesforce.com');
     } else {
       console.log("Not in capture mode");
     }
   });
 }
+
+// Add to window load event to handle Lightning apps that load after initial page load
+window.addEventListener('load', function() {
+  // Check again for Salesforce after full page load
+  if (document.querySelector('.desktop, .oneApp, .slds-scope, .lightningContainer')) {
+    console.log("Salesforce application detected after full page load");
+    isSalesforceMode = true;
+    
+    // Update listeners with Salesforce-specific handling
+    if (isCapturing) {
+      console.log("Re-initializing with Salesforce mode");
+      removeListeners();
+      setupListeners();
+    }
+  }
+});
 
 // Start the extension once document is ready
 if (document.readyState === 'complete') {
