@@ -1,0 +1,484 @@
+<!-- 
+ * Copyright [2025] [Antony Soto]
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ -->
+
+ <!DOCTYPE html>
+ <html lang="en">
+ <head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>SotoScribe - Edit Workflow</title>
+   <style>
+     body {
+       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+       margin: 0;
+       padding: 0;
+       color: #333;
+       background-color: #f5f5f5;
+     }
+     
+     header {
+       background-color: #00635A;
+       color: white;
+       padding: 15px 20px;
+       display: flex;
+       justify-content: space-between;
+       align-items: center;
+     }
+     
+     h1 {
+       font-size: 20px;
+       margin: 0;
+     }
+     
+     .header-buttons {
+       display: flex;
+       gap: 10px;
+     }
+     
+     .main-content {
+       max-width: 1200px;
+       margin: 0 auto;
+       padding: 20px;
+     }
+     
+     .instructions {
+       background-color: white;
+       padding: 20px;
+       border-radius: 4px;
+       box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+       margin-bottom: 20px;
+     }
+     
+     .steps-container {
+       display: flex;
+       flex-direction: column;
+       gap: 20px;
+     }
+     
+     .step {
+       background-color: white;
+       border-radius: 4px;
+       box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+       overflow: hidden;
+       display: flex;
+       flex-direction: column;
+     }
+     
+     .salesforce-step {
+       border-left: 3px solid #00A1E0; /* Salesforce blue */
+     }
+     
+     .step-header {
+       background-color: #f5f5f5;
+       padding: 10px 15px;
+       display: flex;
+       justify-content: space-between;
+       align-items: center;
+       border-bottom: 1px solid #eee;
+     }
+     
+     .step-number {
+       font-weight: 600;
+       color: #00635A;
+       display: flex;
+       align-items: center;
+     }
+     
+     .salesforce-badge {
+       background-color: #00A1E0;
+       color: white;
+       font-size: 12px;
+       padding: 2px 5px;
+       border-radius: 3px;
+       margin-left: 5px;
+     }
+     
+     .step-buttons {
+       display: flex;
+       gap: 5px;
+     }
+     
+     .step-button {
+       background-color: transparent;
+       border: none;
+       cursor: pointer;
+       padding: 5px;
+       color: #666;
+       border-radius: 3px;
+     }
+     
+     .step-button:hover {
+       background-color: #eee;
+     }
+     
+     .step-button.delete:hover {
+       color: #E53935;
+     }
+     
+     .step-content {
+       padding: 15px;
+       display: flex;
+       gap: 20px;
+     }
+     
+     .step-image {
+       flex: 1;
+       max-width: 600px;
+       position: relative;
+     }
+     
+     .step-image img {
+       width: 100%;
+       border: 1px solid #eee;
+       border-radius: 3px;
+     }
+     
+     .image-controls {
+       position: absolute;
+       top: 10px;
+       right: 10px;
+       background-color: rgba(255,255,255,0.8);
+       border-radius: 3px;
+       padding: 5px;
+       display: flex;
+       gap: 5px;
+     }
+     
+     .step-details {
+       flex: 1;
+       display: flex;
+       flex-direction: column;
+       gap: 10px;
+     }
+     
+     .step-instruction {
+       width: 100%;
+       min-height: 80px;
+       padding: 10px;
+       border: 1px solid #ddd;
+       border-radius: 3px;
+       resize: vertical;
+       font-family: inherit;
+       font-size: 16px;
+     }
+     
+     .step-metadata {
+       font-size: 13px;
+       color: #666;
+     }
+     
+     .capture-method {
+       font-size: 11px;
+       color: #888;
+       margin-top: 5px;
+       font-style: italic;
+     }
+     
+     button {
+       padding: 10px 15px;
+       background-color: #00B3A4;
+       color: white;
+       border: none;
+       border-radius: 4px;
+       cursor: pointer;
+       font-weight: 500;
+       font-size: 14px;
+       transition: background-color 0.2s;
+     }
+     
+     button:hover {
+       background-color: #00857A;
+     }
+     
+     button.secondary {
+       background-color: #f5f5f5;
+       color: #333;
+       border: 1px solid #ddd;
+     }
+     
+     button.secondary:hover {
+       background-color: #eee;
+     }
+     
+     button.warning {
+       background-color: #E53935;
+     }
+     
+     button.warning:hover {
+       background-color: #C62828;
+     }
+     
+     .modal {
+       display: none;
+       position: fixed;
+       top: 0;
+       left: 0;
+       right: 0;
+       bottom: 0;
+       background-color: rgba(0,0,0,0.5);
+       z-index: 1000;
+       align-items: center;
+       justify-content: center;
+     }
+     
+     .modal-content {
+       background-color: white;
+       padding: 20px;
+       border-radius: 4px;
+       max-width: 500px;
+       width: 100%;
+     }
+     
+     .modal-header {
+       margin-top: 0;
+     }
+     
+     .modal-buttons {
+       display: flex;
+       justify-content: flex-end;
+       gap: 10px;
+       margin-top: 20px;
+     }
+     
+     .footer {
+       margin-top: 30px;
+       text-align: center;
+       font-size: 13px;
+       color: #666;
+     }
+     
+     .loader {
+       display: inline-block;
+       width: 20px;
+       height: 20px;
+       border: 3px solid rgba(255,255,255,.3);
+       border-radius: 50%;
+       border-top-color: #fff;
+       animation: spin 1s ease-in-out infinite;
+       margin-right: 10px;
+     }
+     
+     .export-options {
+       margin-top: 15px;
+       padding: 10px;
+       background-color: #f8f8f8;
+       border-radius: 4px;
+     }
+     
+     .export-options-title {
+       font-weight: 600;
+       margin-bottom: 10px;
+     }
+     
+     .export-option {
+       display: flex;
+       align-items: center;
+       margin-bottom: 8px;
+     }
+     
+     .export-option input {
+       margin-right: 8px;
+     }
+     
+     .export-option-label {
+       font-size: 14px;
+     }
+     
+     .export-size {
+       margin-top: 10px;
+       font-size: 12px;
+       color: #666;
+     }
+     
+     .zoom-controls {
+       display: flex;
+       align-items: center;
+       gap: 10px;
+     }
+     
+     #zoomLevel {
+       font-size: 14px;
+       font-weight: 500;
+       min-width: 50px;
+       text-align: center;
+     }
+     
+     .tooltip {
+       position: relative;
+       display: inline-block;
+     }
+     
+     .tooltip .tooltiptext {
+       visibility: hidden;
+       width: 200px;
+       background-color: #555;
+       color: #fff;
+       text-align: center;
+       border-radius: 6px;
+       padding: 5px;
+       position: absolute;
+       z-index: 1;
+       bottom: 125%;
+       left: 50%;
+       margin-left: -100px;
+       opacity: 0;
+       transition: opacity 0.3s;
+       font-size: 12px;
+       font-weight: normal;
+     }
+     
+     .tooltip:hover .tooltiptext {
+       visibility: visible;
+       opacity: 1;
+     }
+     
+     @keyframes spin {
+       to { transform: rotate(360deg); }
+     }
+     
+     /* Status indicators for steps */
+     .step-status {
+       display: inline-block;
+       width: 8px;
+       height: 8px;
+       border-radius: 50%;
+       margin-left: 8px;
+     }
+     
+     .status-event {
+       background-color: #4CAF50; /* Green */
+     }
+     
+     .status-mutation {
+       background-color: #FFC107; /* Yellow */
+     }
+     
+     .status-polling {
+       background-color: #FF9800; /* Orange */
+     }
+     
+     .status-screenshot {
+       background-color: #9C27B0; /* Purple */
+     }
+   </style>
+ </head>
+ <body>
+   <header>
+     <h1>SotoScribe - Edit Workflow</h1>
+     <div class="header-buttons">
+       <button id="exportHtmlBtn">Export as HTML</button>
+     </div>
+   </header>
+   
+   <div class="main-content">
+     <div class="instructions">
+       <h2>Edit your workflow</h2>
+       <p>Review and modify the captured steps below. You can edit the instructions, reorder steps, and remove any unwanted steps. When you're done, export to an HTML document that you can view in any browser.</p>
+       <p><strong>Privacy note:</strong> All data remains in your browser's memory and will be erased when you close this tab.</p>
+     </div>
+     
+     <div class="steps-container" id="stepsContainer">
+       <!-- Steps will be dynamically inserted here -->
+     </div>
+     
+     <div class="footer">
+       <p>SotoScribe operates with zero data persistence. All information is stored in-memory only and will be erased upon closing this tab.</p>
+     </div>
+   </div>
+   
+   <!-- Export Modal -->
+   <div id="exportModal" class="modal">
+     <div class="modal-content">
+       <h2 class="modal-header">Export Options</h2>
+       <p>Your workflow documentation is ready to export as an HTML document.</p>
+       
+       <div id="exportContent">
+         <!-- Export content will be inserted here -->
+       </div>
+       
+       <div class="export-options">
+         <div class="export-options-title">Export Settings</div>
+         <div class="export-option">
+           <input type="checkbox" id="compressImages" checked>
+           <label for="compressImages" class="export-option-label">Compress screenshots (reduces file size)</label>
+         </div>
+         <div class="export-size" id="exportSize">
+           Estimated file size: Calculating...
+         </div>
+       </div>
+       
+       <div class="modal-buttons">
+         <button id="closeExportBtn" class="secondary">Cancel</button>
+         <button id="confirmExportBtn">Download HTML</button>
+       </div>
+     </div>
+   </div>
+   
+   <!-- Image Edit Modal -->
+   <div id="imageEditModal" class="modal">
+     <div class="modal-content" style="max-width: 800px;">
+       <h2 class="modal-header">Edit Image</h2>
+       <p>Use the tools below to blur sensitive information or add annotations:</p>
+       
+       <div id="imageEditCanvas" style="width: 100%; margin: 15px 0; border: 1px solid #ddd; overflow: auto; position: relative;"></div>
+       
+       <div style="display: flex; justify-content: space-between; margin-bottom: 15px;">
+         <div style="display: flex; gap: 10px;">
+           <button id="blurToolBtn" class="secondary">Blur Tool</button>
+           <button id="annotateToolBtn" class="secondary">Add Annotation</button>
+           <button id="clickTargetBtn" class="secondary">Add Click Target</button>
+           <button id="resetImageBtn" class="secondary">Reset Image</button>
+         </div>
+         <div class="zoom-controls">
+           <button id="zoomOutBtn" class="secondary" title="Zoom Out">−</button>
+           <span id="zoomLevel">100%</span>
+           <button id="zoomInBtn" class="secondary" title="Zoom In">+</button>
+           <button id="resetZoomBtn" class="secondary" title="Reset Zoom">Reset</button>
+         </div>
+       </div>
+       
+       <div class="modal-buttons">
+         <button id="cancelImageEditBtn" class="secondary">Cancel</button>
+         <div class="tooltip">
+           <button id="saveZoomedImageBtn">Save Zoomed View</button>
+           <span class="tooltiptext">Saves only the current zoomed and visible portion of the image</span>
+         </div>
+         <div class="tooltip">
+           <button id="saveImageEditBtn">Save Changes</button>
+           <span class="tooltiptext">Saves all edits to the full original image</span>
+         </div>
+       </div>
+     </div>
+   </div>
+   
+   <!-- Confirmation Modal -->
+   <div id="confirmationModal" class="modal">
+     <div class="modal-content">
+       <h2 class="modal-header">Confirm Save Zoomed View</h2>
+       <p>You're about to save only the current visible portion of the image. This will crop the original image and cannot be undone.</p>
+       <p>Do you want to continue?</p>
+       
+       <div class="modal-buttons">
+         <button id="cancelZoomedSaveBtn" class="secondary">Cancel</button>
+         <button id="confirmZoomedSaveBtn">Yes, Save Zoomed View</button>
+       </div>
+     </div>
+   </div>
+   
+   <!-- Script imports with modules -->
+   <script type="module" src="editor.js"></script>
+ </body>
+ </html>
